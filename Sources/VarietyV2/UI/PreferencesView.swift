@@ -594,8 +594,14 @@ private struct DownloadingTab: View {
                     SecureField("optional — needed for NSFW", text: $settings.wallhavenAPIKey)
                 }
                 LabeledContent("Unsplash access key") {
-                    SecureField("from unsplash.com/developers", text: $settings.unsplashAccessKey)
+                    HStack {
+                        SecureField("paste your Access Key", text: $settings.unsplashAccessKey)
+                        Link("Get one", destination:
+                            URL(string: "https://unsplash.com/oauth/applications")!)
+                    }
                 }
+                Text("Unsplash is photography rather than digital art, so it is the source to use when Wallhaven returns too much AI and fantasy work. Register a free app, then copy its Access Key (not the Secret).")
+                    .font(.caption).foregroundStyle(.secondary)
                 LabeledContent("Reddit client ID") {
                     SecureField("from reddit.com/prefs/apps", text: $settings.redditClientID)
                 }

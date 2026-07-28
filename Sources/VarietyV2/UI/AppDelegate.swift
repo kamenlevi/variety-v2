@@ -239,6 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.slideshow = nil
                 self?.rebuildMenu()
             }
+            controller.onNeedsPreferences = { [weak self] in self?.showPreferences() }
             controller.start()
             slideshow = controller
         }

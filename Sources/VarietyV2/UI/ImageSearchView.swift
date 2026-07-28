@@ -91,10 +91,19 @@ struct ImageSearchView: View {
             }
 
             if service.needsCredentials, settings.unsplashAccessKey.isEmpty {
-                Label("Unsplash needs an access key — add one under Downloading.",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                HStack(spacing: 4) {
+                    Label("Unsplash needs a free access key — Preferences → Downloading.",
+                          systemImage: "exclamationmark.triangle")
+                    Link("Get one", destination:
+                        URL(string: "https://unsplash.com/oauth/applications")!)
+                }
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
+            if service == .wallhaven {
+                Text("Wallhaven matches tags, not phrases — several words are combined automatically. Its General category leans heavily towards digital and fantasy art; use Unsplash for photography.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Text("Only images that fit your \(ScreenGeometry.description) display are shown.")

@@ -17,6 +17,7 @@ final class SlideshowController: NSObject {
     private var timer: Timer?
 
     var onStop: (() -> Void)?
+    var onNeedsPreferences: (() -> Void)?
     private(set) var isRunning = false
 
     init(rotator: Rotator) {
@@ -29,7 +30,21 @@ final class SlideshowController: NSObject {
         let settings = rotator.settings
         files = collectFiles(settings: settings)
         guard !files.isEmpty else {
-            NSLog("VarietyV2: slideshow has no images to show")
+            // Say so. A slideshow that does nothing when invoked is
+            // indistinguishable from a broken one.
+            let alert = NSAlert()
+            alert.messageText = "No images for the slideshow"
+            alert.informativeText = """
+                None of the selected slideshow sources contain any images yet.
+
+                Check Preferences → Slideshow: turn on Downloads or Favorites, \
+                or pick a custom folder.
+                """
+            alert.addButton(withTitle: "Open Preferences")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn { onNeedsPreferences?() }
+            onStop?()
             return
         }
 
@@ -73,8 +88,15 @@ final class SlideshowController: NSObject {
         var pool: [URL] = []
         if settings.slideshowFavoritesEnabled { pool += rotator.favoritesForDisplay() }
         if settings.slideshowDownloadsEnabled { pool += rotator.recentForDisplay() }
+
+        // "All enabled sources" has to include what those sources actually
+        // produced. An earlier version contributed only local folders here, so
+        // with no folder source configured — the normal case — the slideshow
+        // silently had nothing to show even with dozens of images downloaded.
         if settings.slideshowSourcesEnabled {
             pool += SourceRegistry.activeLocalFiles(settings: settings)
+            pool += rotator.recentForDisplay()
+            pool += rotator.fetchedForDisplay()
         }
         if settings.slideshowCustomEnabled {
             pool += SourceRegistry.imageFiles(in: settings.expand(settings.slideshowCustomFolder))

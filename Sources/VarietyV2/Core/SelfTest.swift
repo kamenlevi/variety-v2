@@ -27,6 +27,7 @@ enum SelfTest {
         wallpaperStoreParsesLiveIndex()
         settingsDecodeLeniently()
         refillTriggersWhenSourcesChange()
+        wallhavenPhrasesBecomeTags()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -189,6 +190,29 @@ enum SelfTest {
               shouldRefill(force: false, poolCount: 40, minimum: 30,
                            signature: "a", lastSignature: nil,
                            lastRefill: nil, interval: 1200, now: now))
+    }
+
+    /// Wallhaven matches a bare multi-word query as one exact tag, so a typed
+    /// phrase returns nothing at all. Measured: "real dark forest" gives 0
+    /// results, "+real +dark +forest" gives ~2,800.
+    private static func wallhavenPhrasesBecomeTags() {
+        let t = WallhavenSource.tagQuery
+
+        check("a phrase becomes an AND of tags",
+              t("real dark forest") == "+real +dark +forest")
+        check("a single word is left alone",
+              t("forest") == "forest")
+        check("surrounding whitespace is trimmed",
+              t("  misty forest  ") == "+misty +forest")
+
+        // Anything already using Wallhaven's syntax must pass through, or the
+        // translation would corrupt deliberate queries.
+        check("existing + syntax is preserved", t("+dark +forest") == "+dark +forest")
+        check("exclusions are preserved", t("-anime forest") == "-anime forest")
+        check("quoted phrases are preserved", t("\"dark forest\"") == "\"dark forest\"")
+        check("id: and like: lookups are preserved", t("id:123") == "id:123")
+        check("@username is preserved", t("@someone") == "@someone")
+        check("an empty query stays empty", t("") == "")
     }
 
     // MARK: -
