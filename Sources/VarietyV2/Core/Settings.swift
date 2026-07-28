@@ -352,7 +352,10 @@ struct Source: Codable, Equatable, Hashable, Identifiable {
         .init(enabled: true, kind: .earthview, location: "Google Earth View Wallpapers"),
         .init(enabled: true, kind: .apod, location: "NASA's Astronomy Picture of the Day"),
         .init(enabled: true, kind: .wallhaven, location: "nature"),
-        .init(enabled: true, kind: .artstation, location: ""),
+        // Off by default: ArtStation "trending" is portfolio and fan art —
+        // character studies and game art — not wallpaper material. It is a
+        // useful source when pointed at a specific artist, not as a firehose.
+        .init(enabled: false, kind: .artstation, location: ""),
         .init(enabled: false, kind: .unsplash, location: ""),
     ]
 }

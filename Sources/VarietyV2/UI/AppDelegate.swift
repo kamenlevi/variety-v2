@@ -145,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let view = PreferencesView(settings: rotator.settings) { [weak self] updated in
+        let view = PreferencesView(settings: rotator.settings, rotator: rotator) { [weak self] updated in
             guard let self else { return }
             self.rotator.applySettings(updated)
             Task { await self.rotator.redrawCurrent() }

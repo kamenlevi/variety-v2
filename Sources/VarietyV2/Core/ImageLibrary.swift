@@ -205,6 +205,84 @@ final class ImageLibrary {
         }
     }
 
+    // MARK: - Bulk removal
+
+    /// How many downloaded images came from each source, for the UI.
+    /// Keyed by the source prefix embedded in the filename.
+    func downloadCountsBySource() -> [(source: String, count: Int, bytes: Int64)] {
+        var tally: [String: (count: Int, bytes: Int64)] = [:]
+        for file in downloaded() {
+            let name = file.lastPathComponent
+            // Filenames are "<sourceid>-<rest>", from RemoteImage.id.
+            let source = name.split(separator: "-").first.map(String.init) ?? "other"
+            let size = Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            let existing = tally[source] ?? (0, 0)
+            tally[source] = (existing.count + 1, existing.bytes + size)
+        }
+        return tally
+            .map { (source: $0.key, count: $0.value.count, bytes: $0.value.bytes) }
+            .sorted { $0.count > $1.count }
+    }
+
+    /// Removes downloaded images, optionally only those from one source.
+    ///
+    /// Favourites are never touched — they live in a different folder by
+    /// design, which is the whole point of favouriting.
+    ///
+    /// - Parameter banish: when true the images are also recorded as rejected,
+    ///   so the same pictures are not downloaded again on the next refill.
+    ///   Without this, deleting is futile — the sources would simply hand them
+    ///   back.
+    @discardableResult
+    func clearDownloads(source: String? = nil, banish: Bool = true) -> Int {
+        var removed = 0
+        for file in downloaded() {
+            if let source {
+                let prefix = file.lastPathComponent.split(separator: "-").first.map(String.init)
+                guard prefix == source else { continue }
+            }
+
+            if banish, let meta = metadata(for: file) {
+                ledger.banished.insert(meta.id)
+                ledger.seen.remove(meta.id)
+            }
+            try? fm.trashItem(at: file, resultingItemURL: nil)
+            let sidecar = file.deletingPathExtension().appendingPathExtension("json")
+            try? fm.trashItem(at: sidecar, resultingItemURL: nil)
+            removed += 1
+        }
+        saveLedger()
+        return removed
+    }
+
+    /// Removes specific files — the Wallpaper Selector's delete action.
+    @discardableResult
+    func remove(_ files: [URL], banish: Bool = true) -> Int {
+        var removed = 0
+        for file in files {
+            // Favourites are removed only from the favourites folder, never
+            // silently banished — the user explicitly kept those.
+            if banish, !isFavorite(file), let meta = metadata(for: file) {
+                ledger.banished.insert(meta.id)
+                ledger.seen.remove(meta.id)
+            }
+            try? fm.trashItem(at: file, resultingItemURL: nil)
+            let sidecar = file.deletingPathExtension().appendingPathExtension("json")
+            try? fm.trashItem(at: sidecar, resultingItemURL: nil)
+            removed += 1
+        }
+        saveLedger()
+        return removed
+    }
+
+    /// Forgets every rejection, so previously trashed images can return.
+    func resetBanished() {
+        ledger.banished.removeAll()
+        saveLedger()
+    }
+
+    var banishedCount: Int { ledger.banished.count }
+
     var downloadedBytes: Int64 {
         downloaded().reduce(Int64(0)) { sum, url in
             sum + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)

@@ -8,7 +8,16 @@ import SwiftUI
 /// environment workarounds. Everything else is here under the same names.
 struct PreferencesView: View {
 
+    /// A snapshot, taken when the window opens.
+    ///
+    /// That is a hazard: anything that changes settings elsewhere while this
+    /// window is open — the Find Images window adding a source, the app
+    /// reacting to something — is invisible here, and the next edit made in
+    /// this window writes the stale snapshot back, silently undoing it. So the
+    /// snapshot is re-synced whenever the window becomes active, and edits are
+    /// merged rather than wholesale replacing.
     @State var settings: Settings
+    let rotator: Rotator
     let onChange: (Settings) -> Void
     var onOpenFolder: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
@@ -17,7 +26,8 @@ struct PreferencesView: View {
     enum Tab: String, CaseIterable, Identifiable {
         case general = "General", wallpaper = "Wallpaper", quotes = "Quotes"
         case clock = "Clock", slideshow = "Slideshow", downloading = "Downloading"
-        case filtering = "Filtering", effects = "Effects", tips = "Tips", about = "About"
+        case library = "Library", filtering = "Filtering", effects = "Effects"
+        case tips = "Tips", about = "About"
         var id: String { rawValue }
     }
 
@@ -38,6 +48,7 @@ struct PreferencesView: View {
                 case .clock:       ClockTab(settings: $settings)
                 case .slideshow:   SlideshowTab(settings: $settings)
                 case .downloading: DownloadingTab(settings: $settings)
+                case .library:     LibraryTab(rotator: rotator)
                 case .filtering:   FilteringTab(settings: $settings)
                 case .effects:     CustomizeTab(settings: $settings)
                 case .tips:        TipsTab()
@@ -48,6 +59,20 @@ struct PreferencesView: View {
         }
         .frame(width: 760, height: 580)
         .onChange(of: settings) { _, new in onChange(new) }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            resync()
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSWindow.didBecomeKeyNotification)) { _ in
+            resync()
+        }
+    }
+
+    /// Pulls in changes made outside this window without clobbering them.
+    private func resync() {
+        let live = rotator.settings
+        if live != settings { settings = live }
     }
 }
 

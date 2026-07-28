@@ -295,6 +295,45 @@ final class Rotator {
 
     var downloadedBytes: Int64 { library.downloadedBytes }
 
+    // MARK: - Bulk removal
+
+    func downloadCountsBySource() -> [(source: String, count: Int, bytes: Int64)] {
+        library.downloadCountsBySource()
+    }
+
+    /// Clears downloads, then makes sure the desktop is not still showing one
+    /// of the images that was just removed.
+    @discardableResult
+    func clearDownloads(source: String? = nil) async -> Int {
+        let removed = library.clearDownloads(source: source)
+        history.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
+        historyIndex = min(historyIndex, history.count - 1)
+
+        if let current, !FileManager.default.fileExists(atPath: current.path) {
+            self.current = nil
+            await next()
+        }
+        onChange?()
+        return removed
+    }
+
+    @discardableResult
+    func remove(_ files: [URL]) async -> Int {
+        let removed = library.remove(files)
+        history.removeAll { files.contains($0) }
+        historyIndex = min(historyIndex, history.count - 1)
+
+        if let current, files.contains(current) {
+            self.current = nil
+            await next()
+        }
+        onChange?()
+        return removed
+    }
+
+    func resetBanished() { library.resetBanished() }
+    var banishedCount: Int { library.banishedCount }
+
     // MARK: - Fetching
 
     /// How long a full pool stays fresh before topping it up anyway.

@@ -14,6 +14,8 @@ struct WallpaperSelectorView: View {
     @State private var scope: Scope = .all
     @State private var files: [URL] = []
     @State private var loading = true
+    @State private var selected: Set<URL> = []
+    @State private var confirmingDelete = false
 
     enum Scope: String, CaseIterable, Identifiable {
         case all = "All", favorites = "Favorites", downloaded = "Downloaded"
@@ -56,8 +58,28 @@ struct WallpaperSelectorView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 10) {
                         ForEach(visible, id: \.self) { file in
-                            Thumbnail(file: file) {
+                            Thumbnail(file: file,
+                                      isSelected: selected.contains(file)) {
                                 Task { await rotator.show(file: file) }
+                            } toggleSelection: {
+                                if selected.contains(file) { selected.remove(file) }
+                                else { selected.insert(file) }
+                            }
+                            .contextMenu {
+                                Button("Set as Wallpaper") {
+                                    Task { await rotator.show(file: file) }
+                                }
+                                Button("Show in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([file])
+                                }
+                                Divider()
+                                Button("Remove", role: .destructive) {
+                                    Task {
+                                        await rotator.remove([file])
+                                        selected.remove(file)
+                                        load()
+                                    }
+                                }
                             }
                         }
                     }
@@ -69,12 +91,42 @@ struct WallpaperSelectorView: View {
             HStack {
                 Text("\(visible.count) of \(files.count) images")
                     .font(.caption).foregroundStyle(.secondary)
+
+                if !selected.isEmpty {
+                    Text("· \(selected.count) selected")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Clear") { selected.removeAll() }
+                        .buttonStyle(.link)
+                }
+
                 Spacer()
+
+                if !selected.isEmpty {
+                    Button("Remove \(selected.count)", role: .destructive) {
+                        confirmingDelete = true
+                    }
+                }
+                Button("Select All Shown") { selected.formUnion(visible) }
+                    .disabled(visible.isEmpty)
                 Button("Reload") { load() }
             }
             .padding(8)
         }
         .task { load() }
+        .alert("Remove \(selected.count) image\(selected.count == 1 ? "" : "s")?",
+               isPresented: $confirmingDelete) {
+            Button("Remove", role: .destructive) {
+                let doomed = Array(selected)
+                Task {
+                    await rotator.remove(doomed)
+                    selected.removeAll()
+                    load()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("They go to the Trash and will not be downloaded again.")
+        }
     }
 
     private var visible: [URL] {
@@ -109,7 +161,9 @@ struct WallpaperSelectorView: View {
 /// Grid cell. Thumbnails are decoded at cell size rather than full resolution.
 private struct Thumbnail: View {
     let file: URL
+    var isSelected: Bool = false
     let action: () -> Void
+    var toggleSelection: () -> Void = {}
 
     @State private var image: NSImage?
 
@@ -127,6 +181,22 @@ private struct Thumbnail: View {
             .frame(height: 120)
             .clipped()
             .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(alignment: .topLeading) {
+                // Checkbox rather than click-to-select: a plain click still
+                // sets the wallpaper, which is the common action.
+                Button(action: toggleSelection) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 17))
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.white.opacity(0.85))
+                        .shadow(radius: 2)
+                }
+                .buttonStyle(.plain)
+                .padding(5)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 3)
+            }
         }
         .buttonStyle(.plain)
         .help(file.lastPathComponent)
