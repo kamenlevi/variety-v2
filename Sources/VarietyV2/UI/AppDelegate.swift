@@ -25,6 +25,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.isTemplate = true
         }
 
+        // Write the file back out in full on every launch, so a partial or
+        // hand-edited settings file becomes complete and inspectable rather
+        // than staying a fragment that only works because decoding is lenient.
+        try? settings.save()
+
+        // Reconcile the login item with the saved preference. macOS keeps this
+        // registration itself, and the user can revoke it in System Settings
+        // behind our back, so it is re-asserted on every launch rather than
+        // assumed to have stuck.
+        if settings.startAtLogin != LoginItem.isEnabled {
+            LoginItem.set(settings.startAtLogin)
+        }
+
         rebuildMenu()
         rotator.start()
     }

@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import Foundation
 
 let appSupport = URL(fileURLWithPath: NSHomeDirectory())
@@ -55,6 +56,24 @@ case "--set":
     } catch {
         FileHandle.standardError.write(Data("failed: \(error)\n".utf8))
         exit(1)
+    }
+
+case "--login-status":
+    // Run this as the bundle's executable, not the bare SwiftPM binary —
+    // SMAppService resolves against Bundle.main.
+    print("bundle:    \(Bundle.main.bundlePath)")
+    print("available: \(LoginItem.isAvailable)")
+    print("enabled:   \(LoginItem.isEnabled)")
+    let raw = SMAppService.mainApp.status
+    let names: [Int: String] = [0: "notRegistered", 1: "enabled", 2: "requiresApproval", 3: "notFound"]
+    print("status:    \(names[Int(raw.rawValue)] ?? "?") (\(raw.rawValue))")
+    if args.count > 1, args[1] == "enable" {
+        do {
+            try SMAppService.mainApp.register()
+            print("register:  ok -> \(LoginItem.isEnabled)")
+        } catch {
+            print("register:  FAILED -> \(error)")
+        }
     }
 
 case "--selftest":

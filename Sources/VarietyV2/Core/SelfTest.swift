@@ -25,6 +25,7 @@ enum SelfTest {
         generationStoreRetainsLiveFile()
         generationStoreCollectsOldFiles()
         wallpaperStoreParsesLiveIndex()
+        settingsDecodeLeniently()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -97,6 +98,39 @@ enum SelfTest {
         }
         _ = WallpaperStore.currentImageURL()
         check("wallpaper store parses the live Index.plist without crashing", true)
+    }
+
+    /// A partial settings file must keep its own values *and* default the rest.
+    /// Getting this wrong silently wipes every preference — it is how the login
+    /// item kept unregistering itself during development.
+    private static func settingsDecodeLeniently() {
+        let partial = Data(#"{"startAtLogin": true}"#.utf8)
+        guard let decoded = try? JSONDecoder().decode(Settings.self, from: partial) else {
+            check("partial settings file decodes at all", false)
+            return
+        }
+        check("a key present in a partial file is honoured", decoded.startAtLogin == true)
+        check("keys absent from a partial file fall back to defaults",
+              decoded.changeIntervalSeconds == Settings().changeIntervalSeconds
+                  && decoded.enabledSourceIDs == Settings().enabledSourceIDs
+                  && decoded.displayMode == Settings().displayMode)
+
+        // An empty object is the degenerate case of the same problem.
+        let empty = try? JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
+        check("an empty settings object decodes to defaults",
+              empty?.changeIntervalSeconds == Settings().changeIntervalSeconds)
+
+        // And a full round trip must be lossless.
+        var full = Settings()
+        full.clockEnabled = true
+        full.displayMode = .fillWithBlur
+        full.keepDownloaded = 321
+        let roundTripped = (try? JSONEncoder().encode(full))
+            .flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
+        check("settings round-trip losslessly",
+              roundTripped?.clockEnabled == true
+                  && roundTripped?.displayMode == .fillWithBlur
+                  && roundTripped?.keepDownloaded == 321)
     }
 
     // MARK: -

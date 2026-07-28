@@ -5,15 +5,26 @@ A wallpaper manager for macOS, in the spirit of
 
 Native Swift, no dependencies, no Python runtime. Lives in the menu bar.
 
-## Status
+## What it does
 
-Early. The wallpaper engine and its self-tests work; sources, effects,
-overlays and UI are in progress.
+- Rotates wallpapers on a timer, on wake, and on login
+- Five image sources working with no setup: Bing Photo of the Day, Google
+  Earth View, NASA APOD, Wallhaven, ArtStation Trending
+- Unsplash and Reddit available once you add your own credentials
+- Keep/discard workflow — favourites are kept aside, trashed images are
+  remembered and never offered again
+- Display modes rendered in Core Image: zoom, black letterbox, blurred fill,
+  oil painting
+- Optional quote and clock drawn onto the wallpaper
+- Menu bar only, no Dock icon; thumbnail strip of recent wallpapers
+- Starts at login
 
 ```
 swift build -c release
-./.build/release/VarietyV2 --selftest
-./Scripts/build-app.sh
+./.build/release/VarietyV2 --selftest      # internal checks
+./.build/release/VarietyV2 --probe-sources # hit the live image APIs
+./.build/release/VarietyV2 --cycle         # one full fetch → render → set
+./Scripts/build-app.sh                     # build VarietyV2.app
 ```
 
 ## Relationship to Variety
@@ -79,6 +90,34 @@ path to read. `currentImageURL()` returns nil rather than inventing one.
 
 Per-Space wallpapers are the least reliable corner of this API and are
 deliberately not attempted. All attached screens get the same image.
+
+## Notes on the sources
+
+Variety was written against a more open web than exists now, and several of
+its sources have since closed off. Checked against the live services:
+
+| Source | State |
+| --- | --- |
+| Bing, Earth View, APOD, Wallhaven | work anonymously |
+| ArtStation | project JSON is behind a Cloudflare challenge; the RSS feeds are open, which is the route Variety uses too |
+| Reddit | refuses anonymous JSON since the 2023 API changes — 403/503 regardless of User-Agent. Needs a free script app |
+| Unsplash | needs your own access key |
+| `api.quotable.io` | no longer resolves. Quotes come from ZenQuotes, with a community Quotable mirror and a bundled set behind it |
+
+`--probe-sources` exists to catch the next one of these to break.
+
+## A note on start-at-login
+
+`SMAppService` registration is invalidated when the `.app` bundle is replaced
+wholesale, so the build script updates the installed bundle in place rather
+than deleting and re-copying it.
+
+Separately: Swift's synthesized `Codable` throws `keyNotFound` for a missing
+key even when the property has a default, so a settings file written by an
+older build would fail to decode and silently reset *every* preference —
+including turning start-at-login back off and unregistering the login item.
+`Settings` therefore decodes leniently, field by field, and the self-test
+covers it.
 
 ## Build
 

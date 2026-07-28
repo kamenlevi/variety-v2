@@ -9,6 +9,7 @@ struct Settings: Codable {
     var changeIntervalSeconds: TimeInterval = 600
     var changeOnWake: Bool = true
     var changeOnLogin: Bool = true
+    var startAtLogin: Bool = false
     var paused: Bool = false
 
     // Sources
@@ -33,16 +34,63 @@ struct Settings: Codable {
     /// How many downloaded images to keep before pruning the oldest unfavourited ones.
     var keepDownloaded: Int = 200
 
+    init() {}
+
+    /// Decodes leniently: any key that is absent keeps its default.
+    ///
+    /// Swift's synthesized `Codable` throws `keyNotFound` for a missing key even
+    /// when the property has a default value, so a settings file written by an
+    /// older build — or one missing a field for any other reason — would fail
+    /// to decode entirely and silently reset every preference. That is exactly
+    /// how `startAtLogin` got reverted during development, taking the login
+    /// item registration with it.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            (try? c.decodeIfPresent(T.self, forKey: key)) .flatMap { $0 } ?? fallback
+        }
+        let defaults = Settings()
+
+        changeIntervalSeconds = value(.changeIntervalSeconds, defaults.changeIntervalSeconds)
+        changeOnWake          = value(.changeOnWake, defaults.changeOnWake)
+        changeOnLogin         = value(.changeOnLogin, defaults.changeOnLogin)
+        startAtLogin          = value(.startAtLogin, defaults.startAtLogin)
+        paused                = value(.paused, defaults.paused)
+
+        enabledSourceIDs      = value(.enabledSourceIDs, defaults.enabledSourceIDs)
+        subreddits            = value(.subreddits, defaults.subreddits)
+        customFeeds           = value(.customFeeds, defaults.customFeeds)
+
+        wallhavenAPIKey       = value(.wallhavenAPIKey, defaults.wallhavenAPIKey)
+        unsplashAccessKey     = value(.unsplashAccessKey, defaults.unsplashAccessKey)
+        redditClientID        = value(.redditClientID, defaults.redditClientID)
+        redditClientSecret    = value(.redditClientSecret, defaults.redditClientSecret)
+
+        displayMode           = value(.displayMode, defaults.displayMode)
+        quotesEnabled         = value(.quotesEnabled, defaults.quotesEnabled)
+        clockEnabled          = value(.clockEnabled, defaults.clockEnabled)
+
+        downloadFolder        = value(.downloadFolder, defaults.downloadFolder)
+        favoritesFolder       = value(.favoritesFolder, defaults.favoritesFolder)
+        keepDownloaded        = value(.keepDownloaded, defaults.keepDownloaded)
+    }
+
     // MARK: - Persistence
 
     static let fileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/VarietyV2/settings.json")
 
     static func load() -> Settings {
-        guard let data = try? Data(contentsOf: fileURL),
-              let settings = try? JSONDecoder().decode(Settings.self, from: data)
-        else { return Settings() }
-        return settings
+        guard let data = try? Data(contentsOf: fileURL) else { return Settings() }
+        do {
+            return try JSONDecoder().decode(Settings.self, from: data)
+        } catch {
+            // Should not happen — decoding is lenient (see init(from:)) — but a
+            // truly corrupt file must not silently reset every preference, so
+            // say so rather than pretending the defaults were the user's choice.
+            NSLog("VarietyV2: settings could not be read (\(error)); using defaults")
+            return Settings()
+        }
     }
 
     func save() throws {

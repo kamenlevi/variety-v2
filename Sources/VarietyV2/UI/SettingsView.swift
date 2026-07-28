@@ -38,6 +38,23 @@ struct SettingsView: View {
             Toggle("Change on login", isOn: $settings.changeOnLogin)
             Toggle("Pause rotation", isOn: $settings.paused)
 
+            Toggle("Start at login", isOn: Binding(
+                get: { settings.startAtLogin },
+                set: { want in
+                    // Reflect what macOS actually did, not what was asked for:
+                    // it can refuse if the user disabled the item in System
+                    // Settings, and a toggle that lies is worse than one that
+                    // snaps back.
+                    settings.startAtLogin = LoginItem.set(want) ? want : LoginItem.isEnabled
+                }))
+            .disabled(!LoginItem.isAvailable)
+
+            if !LoginItem.isAvailable {
+                Text("Start at login needs the app to be running from /Applications, not from a build folder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Divider()
 
             LabeledContent("Downloads") {
@@ -146,6 +163,7 @@ extension Settings: Equatable {
             && a.changeOnWake == b.changeOnWake
             && a.changeOnLogin == b.changeOnLogin
             && a.paused == b.paused
+            && a.startAtLogin == b.startAtLogin
             && a.enabledSourceIDs == b.enabledSourceIDs
             && a.wallhavenAPIKey == b.wallhavenAPIKey
             && a.unsplashAccessKey == b.unsplashAccessKey
