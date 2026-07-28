@@ -24,8 +24,16 @@ final class ImageLibrary {
     // MARK: - Ledger
 
     private struct Ledger: Codable {
+        /// Every image id ever downloaded, so nothing is fetched twice.
         var seen: Set<String> = []
         var banished: Set<String> = []
+        /// Files downloaded but not yet shown as wallpaper.
+        ///
+        /// Variety keeps this per downloader and stops fetching from a source
+        /// once it holds `MAX_UNSEEN_PER_DOWNLOADER` (10) of them, then shows
+        /// unseen images in preference to the general pool. That is what keeps
+        /// its download folder from filling up with images you never look at.
+        var unseen: Set<String> = []
     }
 
     private var ledger = Ledger()
@@ -43,6 +51,38 @@ final class ImageLibrary {
     }
 
     func hasSeen(_ id: String) -> Bool { ledger.seen.contains(id) || ledger.banished.contains(id) }
+
+    // MARK: - Unseen buffer
+
+    /// Variety's `MAX_UNSEEN_PER_DOWNLOADER`.
+    static let maxUnseenPerSource = 10
+
+    /// Downloaded-but-not-yet-shown files that still exist on disk.
+    func unseenFiles() -> [URL] {
+        ledger.unseen
+            .map { URL(fileURLWithPath: $0) }
+            .filter { fm.fileExists(atPath: $0.path) }
+    }
+
+    /// How many unseen images a given source is sitting on. A source at the cap
+    /// is skipped, which is what stops one prolific source dominating.
+    func unseenCount(forSource sourceID: String) -> Int {
+        let prefix = sourceID.replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "-")
+        return unseenFiles().filter { $0.lastPathComponent.hasPrefix(prefix) }.count
+    }
+
+    /// Called when an image is actually displayed.
+    func markSeen(_ file: URL) {
+        guard ledger.unseen.remove(file.path) != nil else { return }
+        saveLedger()
+    }
+
+    private func markUnseen(_ file: URL) {
+        ledger.unseen.insert(file.path)
+        // Drop entries whose files have gone, so the set does not grow forever.
+        ledger.unseen = Set(unseenFiles().map(\.path))
+    }
 
     // MARK: - Download
 
@@ -81,6 +121,7 @@ final class ImageLibrary {
 
         writeMetadata(for: image, at: destination)
         ledger.seen.insert(image.id)
+        markUnseen(destination)
         saveLedger()
         return destination
     }

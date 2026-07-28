@@ -8,7 +8,12 @@ import Foundation
 enum SourceRegistry {
 
     /// A remote source built from a table row, or nil for local kinds.
-    static func downloader(for source: Source, settings: Settings) -> (any ImageSource)? {
+    ///
+    /// `breadth` asks for more results than the rotation needs — the search
+    /// preview uses it, because judging a query by a single page of 24 (of
+    /// which perhaps half survive the screen filter) is not judging it at all.
+    static func downloader(for source: Source, settings: Settings,
+                           breadth: Bool = false) -> (any ImageSource)? {
         guard source.kind.isDownloader else { return nil }
         // Honour Variety's global internet switch.
         guard settings.internetEnabled else { return nil }
@@ -25,6 +30,7 @@ enum SourceRegistry {
             var wallhaven = WallhavenSource()
             wallhaven.query = source.location
             wallhaven.apiKey = settings.wallhavenAPIKey.isEmpty ? nil : settings.wallhavenAPIKey
+            wallhaven.pages = breadth ? 5 : 1
             // Variety's safe mode forces SFW regardless of the key.
             if settings.safeMode { wallhaven.purity = "100" }
             return wallhaven
@@ -39,6 +45,8 @@ enum SourceRegistry {
             var unsplash = UnsplashSource()
             unsplash.accessKey = settings.unsplashAccessKey
             unsplash.query = source.location
+            // 30 is Unsplash's per-request maximum.
+            unsplash.count = 30
             return unsplash
 
         case .reddit:

@@ -14,6 +14,10 @@ struct WallhavenSource: ImageSource {
     var purity: String = "100"
     var apiKey: String?
     var minimumWidth: Int = 1920
+    /// Wallhaven returns 24 results per page. One page is plenty for topping up
+    /// the rotation, but far too few to judge a search by, so the search
+    /// preview asks for several.
+    var pages: Int = 1
 
     /// Converts a plain phrase into Wallhaven's tag syntax.
     ///
@@ -58,7 +62,7 @@ struct WallhavenSource: ImageSource {
         // nothing, drop the leading words one at a time — adjectives tend to
         // come first and the subject last, so this converges on what was meant.
         for attempt in Self.relaxations(of: query) {
-            let images = try await fetch(tagQuery: attempt)
+            let images = try await fetchPages(tagQuery: attempt)
             if !images.isEmpty { return images }
         }
         return []
@@ -78,7 +82,28 @@ struct WallhavenSource: ImageSource {
         return ladder
     }
 
-    private func fetch(tagQuery: String) async throws -> [RemoteImage] {
+    /// Fetches `pages` pages concurrently and concatenates them, dropping
+    /// duplicates (Wallhaven can repeat entries across pages when sorting by
+    /// favourites while new uploads shift the ordering).
+    private func fetchPages(tagQuery: String) async throws -> [RemoteImage] {
+        guard pages > 1 else { return try await fetch(tagQuery: tagQuery, page: 1) }
+
+        let results: [[RemoteImage]] = await withTaskGroup(of: [RemoteImage].self) { group in
+            for page in 1...pages {
+                group.addTask {
+                    (try? await fetch(tagQuery: tagQuery, page: page)) ?? []
+                }
+            }
+            var all: [[RemoteImage]] = []
+            for await batch in group { all.append(batch) }
+            return all
+        }
+
+        var seen = Set<String>()
+        return results.flatMap { $0 }.filter { seen.insert($0.id).inserted }
+    }
+
+    private func fetch(tagQuery: String, page: Int = 1) async throws -> [RemoteImage] {
         var components = URLComponents(string: "https://wallhaven.cc/api/v1/search")!
 
         // `atleast` is computed from the actual display rather than hardcoded,
@@ -89,6 +114,7 @@ struct WallhavenSource: ImageSource {
             URLQueryItem(name: "categories", value: categories),
             URLQueryItem(name: "purity", value: purity),
             URLQueryItem(name: "atleast", value: "\(Int(screen.width))x\(Int(screen.height))"),
+            URLQueryItem(name: "page", value: "\(page)"),
         ]
 
         if tagQuery.isEmpty {

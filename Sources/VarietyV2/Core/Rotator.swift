@@ -155,17 +155,22 @@ final class Rotator {
     }
 
     /// Variety biases towards freshly downloaded images over the local pool via
-    /// `download_preference_ratio`.
+    /// `download_preference_ratio`, and shows *unseen* downloads in preference
+    /// to ones already displayed — otherwise a newly added source might not
+    /// surface for hours behind a large existing pool.
     private func pickNext() -> URL? {
+        let unseen = library.unseenFiles()
         let downloaded = library.downloaded()
         let local = SourceRegistry.activeLocalFiles(settings: settings)
 
-        if !downloaded.isEmpty, !local.isEmpty {
+        let fromNetwork = !unseen.isEmpty ? unseen : downloaded
+
+        if !fromNetwork.isEmpty, !local.isEmpty {
             return Double.random(in: 0...1) < settings.downloadPreferenceRatio
-                ? downloaded.randomElement()
+                ? fromNetwork.randomElement()
                 : local.randomElement()
         }
-        return downloaded.randomElement() ?? local.randomElement()
+        return fromNetwork.randomElement() ?? local.randomElement()
     }
 
     func previous() async {
@@ -214,6 +219,8 @@ final class Rotator {
 
             current = file
             currentOrigin = library.metadata(for: file)
+            // It has now been seen, which frees its source to fetch another.
+            library.markSeen(file)
             if recordHistory {
                 if historyIndex < history.count - 1 {
                     history.removeSubrange((historyIndex + 1)...)
@@ -223,6 +230,9 @@ final class Rotator {
             }
             generations.collect(keeping: destination)
             onChange?()
+            // Variety triggers a download a couple of seconds after each
+            // change, so fetching happens in the gaps rather than in bursts.
+            topUpInBackground()
         } catch {
             NSLog("VarietyV2: could not show \(file.lastPathComponent): \(error)")
         }
@@ -408,10 +418,51 @@ final class Rotator {
             NSLog("VarietyV2: \(candidates.count - fitting.count) of \(candidates.count) candidates rejected as too small or wrong shape for \(Int(screen.width))×\(Int(screen.height))")
         }
 
-        for image in ranked.prefix(40) {
-            do { try await library.download(image, screenSize: screen) }
-            catch { NSLog("VarietyV2: download failed for \(image.id): \(error)") }
+        // Keep the candidates as a queue of metadata and download sparingly.
+        //
+        // Variety never bulk-downloads: it fetches one image at a time and
+        // stops taking from a source once that source is holding ten images
+        // you have not seen yet. Grabbing forty per refill filled the folder
+        // with images that would never be looked at and made every source
+        // feel the same.
+        queue = ranked
+        await downloadFromQueue(screenSize: screen)
+    }
+
+    /// Candidate metadata waiting to be downloaded. Cheap to hold — a few
+    /// hundred bytes each — and the reason downloading can be lazy.
+    private var queue: [RemoteImage] = []
+
+    /// Downloads up to `limit` images, skipping sources that already have
+    /// enough unseen images waiting.
+    private func downloadFromQueue(screenSize: CGSize, limit: Int = 4) async {
+        var downloaded = 0
+
+        while downloaded < limit, !queue.isEmpty {
+            let image = queue.removeFirst()
+
+            // The source id is the part of the image id before the colon.
+            let sourceID = image.id.split(separator: ":").first.map(String.init) ?? image.sourceName
+            guard library.unseenCount(forSource: sourceID) < ImageLibrary.maxUnseenPerSource else {
+                continue
+            }
+
+            do {
+                if try await library.download(image, screenSize: screenSize) != nil {
+                    downloaded += 1
+                }
+            } catch {
+                NSLog("VarietyV2: download failed for \(image.id): \(error)")
+            }
         }
+
         library.enforceQuota()
+    }
+
+    /// Tops up in the background after a wallpaper change, as Variety does two
+    /// seconds after each change, so downloading never blocks the rotation.
+    private func topUpInBackground() {
+        guard settings.internetEnabled, !queue.isEmpty else { return }
+        Task { await downloadFromQueue(screenSize: Self.targetSize(), limit: 2) }
     }
 }

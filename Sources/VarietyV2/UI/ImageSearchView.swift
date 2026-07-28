@@ -179,7 +179,8 @@ struct ImageSearchView: View {
         let settings = settings
 
         searchTask = Task {
-            guard let downloader = SourceRegistry.downloader(for: source, settings: settings) else {
+            guard let downloader = SourceRegistry.downloader(
+                for: source, settings: settings, breadth: true) else {
                 await MainActor.run {
                     state = .failed(service.needsCredentials
                                     ? "\(service.rawValue) needs credentials before it can be searched."
@@ -199,7 +200,7 @@ struct ImageSearchView: View {
                     .sorted { $0.aspectMatch > $1.aspectMatch }
 
                 await MainActor.run {
-                    results = Array(fitting.prefix(60))
+                    results = Array(fitting.prefix(120))
                     state = .done(count: fitting.count)
                 }
             } catch {

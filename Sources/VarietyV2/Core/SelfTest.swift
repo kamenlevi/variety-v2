@@ -28,6 +28,7 @@ enum SelfTest {
         settingsDecodeLeniently()
         refillTriggersWhenSourcesChange()
         wallhavenPhrasesBecomeTags()
+        wallhavenRelaxationLadder()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -213,6 +214,21 @@ enum SelfTest {
         check("id: and like: lookups are preserved", t("id:123") == "id:123")
         check("@username is preserved", t("@someone") == "@someone")
         check("an empty query stays empty", t("") == "")
+    }
+
+    /// A failed phrase must broaden rather than return nothing.
+    private static func wallhavenRelaxationLadder() {
+        let ladder = WallhavenSource.relaxations(of: "real dark forest")
+        check("a phrase relaxes by dropping leading words",
+              ladder == ["+real +dark +forest", "+dark +forest", "+forest"])
+
+        check("a single word has nothing to relax",
+              WallhavenSource.relaxations(of: "forest") == ["forest"])
+
+        // Deliberate operator syntax must not be broadened behind the user's
+        // back — an exclusion silently dropped would change what they asked for.
+        check("operator syntax is not relaxed",
+              WallhavenSource.relaxations(of: "-anime forest") == ["-anime forest"])
     }
 
     // MARK: -

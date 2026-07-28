@@ -97,7 +97,7 @@ case "--search":
     let searchSemaphore = DispatchSemaphore(value: 0)
     Task {
         let source = Source(enabled: true, kind: kind, location: term)
-        guard let downloader = SourceRegistry.downloader(for: source, settings: settings) else {
+        guard let downloader = SourceRegistry.downloader(for: source, settings: settings, breadth: true) else {
             print("source unavailable (needs credentials, or internet access is off)")
             searchSemaphore.signal(); return
         }
