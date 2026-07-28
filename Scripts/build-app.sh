@@ -37,6 +37,12 @@ fi
 
 VERSION=$(git describe --tags --always 2>/dev/null || echo "0.1.0")
 
+# App icon. Variety's own icon, rasterised from its SVG — this is Variety for
+# macOS, so it should look like it. Regenerate with Scripts/make-icon.sh.
+if [[ -f "$ROOT/Resources/Variety.icns" ]]; then
+    cp "$ROOT/Resources/Variety.icns" "$APP/Contents/Resources/Variety.icns"
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -49,6 +55,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key>           <string>${VERSION}</string>
+    <key>CFBundleIconFile</key>          <string>Variety</string>
     <key>LSMinimumSystemVersion</key>    <string>14.0</string>
     <!-- Menu bar app: no Dock icon, no main window on launch. -->
     <key>LSUIElement</key>               <true/>

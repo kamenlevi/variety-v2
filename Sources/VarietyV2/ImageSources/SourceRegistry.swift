@@ -47,6 +47,7 @@ enum SourceRegistry {
             unsplash.query = source.location
             // 30 is Unsplash's per-request maximum.
             unsplash.count = 30
+            unsplash.pages = breadth ? 5 : 1
             return unsplash
 
         case .reddit:
