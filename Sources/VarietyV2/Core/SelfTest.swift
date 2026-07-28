@@ -30,6 +30,7 @@ enum SelfTest {
         wallhavenPhrasesBecomeTags()
         wallhavenRelaxationLadder()
         preparedBufferCoversEverythingBeforeRepeating()
+        donationDetailsAreUpstream()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -295,6 +296,25 @@ enum SelfTest {
         let mostFrequent = tally.values.max() ?? 0
         check("no image is over-represented (max \(mostFrequent) of 3 expected)",
               mostFrequent <= 6)
+    }
+
+    /// The donation destinations must stay exactly as upstream publishes them.
+    ///
+    /// Worth a test purely because of the consequence of being wrong: a typo
+    /// here does not fail loudly, it quietly sends someone's money somewhere
+    /// else. Values are from `VarietyWindow.DONATE_URL` and the
+    /// `donate_bitcoin_address` field in Variety's preferences UI.
+    private static func donationDetailsAreUpstream() {
+        let url = DonateTab.payPalURL.absoluteString
+        check("PayPal recipient is Variety's own",
+              url.contains("business=DHQUELMQRQW46"))
+        check("PayPal donation is labelled and denominated as upstream",
+              url.contains("item_name=Variety+Wallpaper+Changer")
+                  && url.contains("currency_code=EUR"))
+        check("PayPal link points at paypal.com",
+              DonateTab.payPalURL.host == "www.paypal.com")
+        check("Bitcoin wallet matches upstream",
+              DonateTab.bitcoinAddress == "bc1qgxlvmwe2pj5lvku6vm53edes3q7c3ykta7xyu4")
     }
 
     // MARK: -

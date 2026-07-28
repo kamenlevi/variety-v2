@@ -103,6 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         add(menu, "Preferences…", key: ",") { [weak self] in self?.showPreferences() }
         add(menu, "About Variety", key: "") { [weak self] in self?.showPreferences(tab: "About") }
+        add(menu, "Donate", key: "") {
+            NSWorkspace.shared.open(DonateTab.payPalURL)
+        }
         add(menu, "Quit Variety", key: "q") { NSApp.terminate(nil) }
 
         statusItem.menu = menu

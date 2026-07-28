@@ -27,7 +27,7 @@ struct PreferencesView: View {
         case general = "General", wallpaper = "Wallpaper", quotes = "Quotes"
         case clock = "Clock", slideshow = "Slideshow", downloading = "Downloading"
         case library = "Library", filtering = "Filtering", effects = "Effects"
-        case tips = "Tips", about = "About"
+        case tips = "Tips", about = "About", donate = "Donate"
         var id: String { rawValue }
     }
 
@@ -53,6 +53,7 @@ struct PreferencesView: View {
                 case .effects:     CustomizeTab(settings: $settings)
                 case .tips:        TipsTab()
                 case .about:       AboutTab()
+                case .donate:      DonateTab()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
