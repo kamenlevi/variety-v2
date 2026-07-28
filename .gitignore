@@ -1,0 +1,7 @@
+.build/
+.build-arm64/
+.build-x86_64/
+build/
+.DS_Store
+*.xcodeproj
+.swiftpm/
