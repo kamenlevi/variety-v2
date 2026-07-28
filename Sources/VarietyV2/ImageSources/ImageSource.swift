@@ -13,6 +13,25 @@ struct RemoteImage: Hashable, Codable {
     let author: String?
     let sourceName: String
 
+    /// Pixel dimensions when the service reports them. Variety uses these to
+    /// reject unsuitable images *before* downloading — the whole point of
+    /// asking the API for sizes rather than measuring files afterwards.
+    var pixelWidth: Int?
+    var pixelHeight: Int?
+
+    /// 0...1 shape agreement with the screen; 1 means it will crop perfectly.
+    /// Unknown dimensions score neutral rather than last, so sources that do
+    /// not report sizes are not silently starved.
+    var aspectMatch: Double {
+        guard let pixelWidth, let pixelHeight else { return 0.75 }
+        return ScreenGeometry.aspectMatch(width: pixelWidth, height: pixelHeight)
+    }
+
+    func fitsScreen(settings: Settings) -> Bool {
+        guard let pixelWidth, let pixelHeight else { return true }
+        return ScreenGeometry.sizeOK(width: pixelWidth, height: pixelHeight, settings: settings)
+    }
+
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
     static func == (a: RemoteImage, b: RemoteImage) -> Bool { a.id == b.id }
 }

@@ -76,6 +76,48 @@ case "--login-status":
         }
     }
 
+case "--search":
+    // Exercises the same path the Find Images window uses.
+    guard args.count > 2 else {
+        FileHandle.standardError.write(Data("usage: VarietyV2 --search <wallhaven|unsplash|reddit|artstation> <query>\n".utf8))
+        exit(2)
+    }
+    let kindName = args[1]
+    let term = args[2...].joined(separator: " ")
+    let settings = Settings.load()
+
+    guard let kind = Source.Kind(rawValue: kindName) else {
+        FileHandle.standardError.write(Data("unknown source '\(kindName)'\n".utf8))
+        exit(2)
+    }
+
+    print("screen: \(ScreenGeometry.description)")
+    print("asking for at least \(Int(ScreenGeometry.primaryPixelSize.width))×\(Int(ScreenGeometry.primaryPixelSize.height))")
+
+    let searchSemaphore = DispatchSemaphore(value: 0)
+    Task {
+        let source = Source(enabled: true, kind: kind, location: term)
+        guard let downloader = SourceRegistry.downloader(for: source, settings: settings) else {
+            print("source unavailable (needs credentials, or internet access is off)")
+            searchSemaphore.signal(); return
+        }
+        do {
+            let found = try await downloader.fetch()
+            let fitting = found.filter { $0.fitsScreen(settings: settings) }
+                .sorted { $0.aspectMatch > $1.aspectMatch }
+            print("\(found.count) result(s), \(fitting.count) fit this screen")
+            for image in fitting.prefix(5) {
+                let dims = image.pixelWidth.map { "\($0)×\(image.pixelHeight ?? 0)" } ?? "size unreported"
+                print(String(format: "  %-14@ match %.2f  %@", dims as NSString,
+                             image.aspectMatch, (image.title ?? "") as NSString))
+            }
+        } catch {
+            print("failed: \(error)")
+        }
+        searchSemaphore.signal()
+    }
+    searchSemaphore.wait()
+
 case "--selftest":
     exit(SelfTest.run() ? 0 : 1)
 

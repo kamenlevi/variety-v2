@@ -12,21 +12,72 @@ struct PreferencesView: View {
     let onChange: (Settings) -> Void
     var onOpenFolder: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
+    @State private var tab: Tab = .general
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case general = "General", wallpaper = "Wallpaper", quotes = "Quotes"
+        case clock = "Clock", slideshow = "Slideshow", downloading = "Downloading"
+        case filtering = "Filtering", effects = "Effects", tips = "Tips", about = "About"
+        var id: String { rawValue }
+    }
+
     var body: some View {
-        TabView {
-            GeneralTab(settings: $settings).tabItem { Text("General") }
-            WallpaperTab(settings: $settings).tabItem { Text("Wallpaper") }
-            QuotesTab(settings: $settings).tabItem { Text("Quotes") }
-            ClockTab(settings: $settings).tabItem { Text("Clock") }
-            SlideshowTab(settings: $settings).tabItem { Text("Slideshow") }
-            DownloadingTab(settings: $settings).tabItem { Text("Downloading") }
-            FilteringTab(settings: $settings).tabItem { Text("Filtering") }
-            CustomizeTab(settings: $settings).tabItem { Text("Effects") }
-            TipsTab().tabItem { Text("Tips") }
-            AboutTab().tabItem { Text("About") }
+        VStack(spacing: 0) {
+            // A single compact row of small tabs, as in the GTK original.
+            // SwiftUI's own TabView on macOS renders large pill tabs that wrap
+            // once there are ten of them, which looks nothing like Variety.
+            TabStrip(selection: $tab)
+
+            Divider()
+
+            Group {
+                switch tab {
+                case .general:     GeneralTab(settings: $settings)
+                case .wallpaper:   WallpaperTab(settings: $settings)
+                case .quotes:      QuotesTab(settings: $settings)
+                case .clock:       ClockTab(settings: $settings)
+                case .slideshow:   SlideshowTab(settings: $settings)
+                case .downloading: DownloadingTab(settings: $settings)
+                case .filtering:   FilteringTab(settings: $settings)
+                case .effects:     CustomizeTab(settings: $settings)
+                case .tips:        TipsTab()
+                case .about:       AboutTab()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 720, height: 560)
+        .frame(width: 760, height: 580)
         .onChange(of: settings) { _, new in onChange(new) }
+    }
+}
+
+/// The row of small tabs across the top.
+private struct TabStrip: View {
+    @Binding var selection: PreferencesView.Tab
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(PreferencesView.Tab.allCases) { tab in
+                Button {
+                    selection = tab
+                } label: {
+                    Text(tab.rawValue)
+                        .font(.system(size: 11))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(selection == tab
+                                      ? Color.accentColor.opacity(0.85)
+                                      : Color.clear))
+                        .foregroundStyle(selection == tab ? Color.white : Color.primary)
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
     }
 }
 
@@ -86,6 +137,7 @@ private struct SourceTable: View {
     @Binding var selection: Source.ID?
     @Binding var showingAdd: Bool
     @State private var editing: Source?
+    @State private var showingSearch = false
 
     private var selected: Source? {
         settings.sources.first { $0.id == selection }
@@ -113,6 +165,7 @@ private struct SourceTable: View {
             .frame(minHeight: 220)
 
             VStack(spacing: 6) {
+                Button("Search…") { showingSearch = true }
                 Button("Add…") { showingAdd = true }
                 Button("Open Folder") { openFolder() }
                     .disabled(selected.map { !isFolderish($0) } ?? true)
@@ -128,6 +181,18 @@ private struct SourceTable: View {
                 settings.sources.append(new)
                 showingAdd = false
             } cancel: { showingAdd = false }
+        }
+        .sheet(isPresented: $showingSearch) {
+            ImageSearchView(settings: settings) { new in
+                if !settings.sources.contains(where: { $0.id == new.id }) {
+                    settings.sources.append(new)
+                }
+                showingSearch = false
+            }
+            .overlay(alignment: .topTrailing) {
+                Button("Close") { showingSearch = false }
+                    .padding(10)
+            }
         }
         .sheet(item: $editing) { source in
             AddSourceSheet(editing: source) { updated in
@@ -494,6 +559,12 @@ private struct FilteringTab: View {
 
     var body: some View {
         Form {
+            Section("Your display") {
+                LabeledContent("Detected") { Text(ScreenGeometry.description) }
+                Text("Sources are queried for images at least this large, so downloads fit without upscaling. The filters below narrow it further.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section {
                 Toggle("Only use landscape images", isOn: $settings.useLandscapeEnabled)
             }

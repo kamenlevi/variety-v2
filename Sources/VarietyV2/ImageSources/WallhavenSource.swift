@@ -28,13 +28,27 @@ struct WallhavenSource: ImageSource {
 
     func fetch() async throws -> [RemoteImage] {
         var components = URLComponents(string: "https://wallhaven.cc/api/v1/search")!
+
+        // `atleast` is computed from the actual display rather than hardcoded,
+        // so Wallhaven only returns wallpapers that can fill this screen. This
+        // is Variety's approach: constrain at the API, not after downloading.
+        let screen = ScreenGeometry.primaryPixelSize
         var items = [
             URLQueryItem(name: "categories", value: categories),
             URLQueryItem(name: "purity", value: purity),
-            URLQueryItem(name: "sorting", value: "random"),
-            URLQueryItem(name: "atleast", value: "\(minimumWidth)x1080"),
+            URLQueryItem(name: "atleast", value: "\(Int(screen.width))x\(Int(screen.height))"),
         ]
-        if !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }
+
+        if query.isEmpty {
+            items.append(URLQueryItem(name: "sorting", value: "random"))
+        } else {
+            // With a search term, Variety sorts by favourites descending — the
+            // best of the matches rather than an arbitrary slice of them.
+            items.append(URLQueryItem(name: "q", value: query))
+            items.append(URLQueryItem(name: "sorting", value: "favorites"))
+            items.append(URLQueryItem(name: "order", value: "desc"))
+        }
+
         if let apiKey, !apiKey.isEmpty { items.append(URLQueryItem(name: "apikey", value: apiKey)) }
         components.queryItems = items
 
@@ -42,14 +56,17 @@ struct WallhavenSource: ImageSource {
         // credentials problem rather than a generic HTTP failure.
         do {
             let response = try await Net.json(Response.self, from: components.url!)
-            return response.data.map { item in
-                RemoteImage(
+            return response.data.compactMap { item -> RemoteImage? in
+                guard let imageURL = URL(string: item.path) else { return nil }
+                return RemoteImage(
                     id: "wallhaven:\(item.id)",
-                    imageURL: URL(string: item.path)!,
+                    imageURL: imageURL,
                     originURL: URL(string: item.url),
                     title: nil,
                     author: nil,
-                    sourceName: displayName
+                    sourceName: displayName,
+                    pixelWidth: item.dimension_x,
+                    pixelHeight: item.dimension_y
                 )
             }
         } catch SourceError.badResponse(401) {

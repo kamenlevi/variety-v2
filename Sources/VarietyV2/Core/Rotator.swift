@@ -303,7 +303,26 @@ final class Rotator {
         }
 
         let screen = Self.targetSize()
-        for image in candidates.shuffled().prefix(40) {
+
+        // Reject on the dimensions the service reported, before spending any
+        // bandwidth — this is what makes "only images that fit my screen"
+        // actually cheap. Sources that report no size fall through and get
+        // checked against the file after download instead.
+        let fitting = candidates.filter { $0.fitsScreen(settings: settings) }
+
+        // Then prefer the ones whose shape matches the screen, so the crop
+        // throws away as little as possible. Sampled rather than strictly
+        // ordered, or every refill would return the same images.
+        let ranked = fitting
+            .map { (image: $0, score: $0.aspectMatch * Double.random(in: 0.75...1.0)) }
+            .sorted { $0.score > $1.score }
+            .map(\.image)
+
+        if fitting.count < candidates.count {
+            NSLog("VarietyV2: \(candidates.count - fitting.count) of \(candidates.count) candidates rejected as too small or wrong shape for \(Int(screen.width))×\(Int(screen.height))")
+        }
+
+        for image in ranked.prefix(40) {
             do { try await library.download(image, screenSize: screen) }
             catch { NSLog("VarietyV2: download failed for \(image.id): \(error)") }
         }

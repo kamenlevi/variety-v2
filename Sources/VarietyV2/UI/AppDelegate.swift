@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesWindow: NSWindow?
     private var filmstrip: FilmstripPanel?
     private var selectorWindow: NSWindow?
+    private var searchWindow: NSWindow?
     private var slideshow: SlideshowController?
     private var menuTargets: [ClosureMenuItem] = []
 
@@ -77,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        add(menu, "Find Images…", key: "k") { [weak self] in self?.showSearch() }
         add(menu, "History", key: "h") { [weak self] in self?.showFilmstrip(.history) }
         add(menu, "Wallpaper Selector", key: "l") { [weak self] in self?.showSelector() }
 
@@ -173,6 +175,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contents = contents
         panel.reload()
         panel.present()
+    }
+
+    /// Search a service by subject and add it to the rotation.
+    private func showSearch() {
+        if let searchWindow {
+            searchWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let view = ImageSearchView(settings: rotator.settings) { [weak self] source in
+            guard let self else { return }
+            var updated = self.rotator.settings
+            if !updated.sources.contains(where: { $0.id == source.id }) {
+                updated.sources.append(source)
+            }
+            self.rotator.applySettings(updated)
+            Task { await self.rotator.refillIfNeeded(minimum: .max) }
+            self.searchWindow?.close()
+            self.searchWindow = nil
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered, defer: false)
+        window.title = "Find Images"
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        searchWindow = window
     }
 
     private func showSelector() {

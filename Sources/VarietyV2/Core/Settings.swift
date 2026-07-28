@@ -51,7 +51,11 @@ struct Settings: Codable {
     // MARK: Wallpaper
 
     var wallpaperAutoRotate = true
-    var wallpaperDisplayMode = "os"
+    /// Variety defaults to "os" and lets the desktop environment decide. macOS
+    /// scales crudely, so the default here is "smart": zoom when the image's
+    /// shape is close to the screen's, blurred fill when cropping would lose
+    /// too much.
+    var wallpaperDisplayMode = "smart"
 
     // MARK: Fetched / clipboard
 
@@ -72,7 +76,10 @@ struct Settings: Codable {
     var desiredColorEnabled = false
     /// RGB 0...255.
     var desiredColor: [Int]? = nil
-    var minSizeEnabled = false
+    /// On by default, unlike Variety. Combined with the API-level size
+    /// requests this is what makes "only images that fit my screen" true out
+    /// of the box rather than something to go and switch on.
+    var minSizeEnabled = true
     /// Percent of screen size.
     var minSize = 80
     var useLandscapeEnabled = true
