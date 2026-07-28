@@ -39,6 +39,43 @@ case "--set":
 case "--selftest":
     exit(SelfTest.run() ? 0 : 1)
 
+case "--render":
+    // Renders every display mode plus the overlays from one source image, so
+    // the pipeline can be eyeballed without touching the desktop.
+    guard args.count > 1 else {
+        FileHandle.standardError.write(Data("usage: VarietyV2 --render <image> [outdir]\n".utf8))
+        exit(2)
+    }
+    let source = URL(fileURLWithPath: (args[1] as NSString).expandingTildeInPath)
+    let outDir = URL(fileURLWithPath: args.count > 2
+                     ? (args[2] as NSString).expandingTildeInPath
+                     : NSTemporaryDirectory()).appendingPathComponent("varietyv2-render")
+    try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+
+    let size = CGSize(width: 2560, height: 1600)
+    for mode in DisplayMode.allCases {
+        let dest = outDir.appendingPathComponent("\(mode.rawValue).jpg")
+        do {
+            try ImagePipeline.render(.init(source: source, targetSize: size, mode: mode,
+                                           quote: nil, clockDate: nil, settings: Settings()),
+                                     to: dest)
+            print("  ok    \(mode.rawValue) -> \(dest.path)")
+        } catch {
+            print("  FAIL  \(mode.rawValue): \(error)")
+        }
+    }
+
+    let overlaid = outDir.appendingPathComponent("overlays.jpg")
+    do {
+        try ImagePipeline.render(.init(
+            source: source, targetSize: size, mode: .zoom,
+            quote: QuoteProvider.offline[0], clockDate: Date(), settings: Settings()),
+                                 to: overlaid)
+        print("  ok    quote + clock -> \(overlaid.path)")
+    } catch {
+        print("  FAIL  overlays: \(error)")
+    }
+
 case "--probe-sources":
     // Hits the real endpoints. Used to catch upstream APIs changing shape or
     // closing off, which is the main way this app rots.
