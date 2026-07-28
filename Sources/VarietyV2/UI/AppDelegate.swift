@@ -37,6 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.isTemplate = true
         }
 
+        // Without a main menu there is no Edit menu, and therefore no working
+        // Cut/Copy/Paste in any text field the app shows.
+        MainMenu.install()
+
         rebuildMenu()
         rotator.start()
     }
@@ -138,10 +142,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Windows
 
+    @objc func openPreferencesFromMenu() { showPreferences() }
+
     private func showPreferences(tab: String? = nil) {
         if let preferencesWindow {
-            preferencesWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            WindowPresenter.shared.present(preferencesWindow)
             return
         }
 
@@ -151,17 +156,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await self.rotator.redrawCurrent() }
         }
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered, defer: false)
-        window.title = "Variety Preferences"
+        let window = WindowPresenter.shared.makeWindow(
+            title: "Variety Preferences",
+            size: NSSize(width: 780, height: 600),
+            minSize: NSSize(width: 700, height: 480))
         window.contentView = NSHostingView(rootView: view)
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-
+        WindowPresenter.shared.present(window)
         preferencesWindow = window
     }
 
@@ -180,8 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Search a service by subject and add it to the rotation.
     private func showSearch() {
         if let searchWindow {
-            searchWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            WindowPresenter.shared.present(searchWindow)
             return
         }
         let view = ImageSearchView(settings: rotator.settings) { [weak self] source in
@@ -196,36 +195,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.searchWindow = nil
         }
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered, defer: false)
-        window.title = "Find Images"
+        let window = WindowPresenter.shared.makeWindow(
+            title: "Find Images", size: NSSize(width: 820, height: 620))
         window.contentView = NSHostingView(rootView: view)
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        WindowPresenter.shared.present(window)
         searchWindow = window
     }
 
     private func showSelector() {
         if let selectorWindow {
-            selectorWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            WindowPresenter.shared.present(selectorWindow)
             return
         }
         let view = WallpaperSelectorView(rotator: rotator)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered, defer: false)
-        window.title = "Wallpaper Selector"
+        let window = WindowPresenter.shared.makeWindow(
+            title: "Wallpaper Selector", size: NSSize(width: 980, height: 660))
         window.contentView = NSHostingView(rootView: view)
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        WindowPresenter.shared.present(window)
         selectorWindow = window
     }
 

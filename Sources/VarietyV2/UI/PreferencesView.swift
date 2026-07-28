@@ -81,6 +81,15 @@ private struct TabStrip: View {
     @Binding var selection: PreferencesView.Tab
 
     var body: some View {
+        // Scrollable: there are eleven tabs, and a plain HStack silently clips
+        // the last of them at narrower window widths, making those pages
+        // unreachable.
+        ScrollView(.horizontal, showsIndicators: false) {
+            strip
+        }
+    }
+
+    private var strip: some View {
         HStack(spacing: 2) {
             ForEach(PreferencesView.Tab.allCases) { tab in
                 Button {
@@ -99,7 +108,8 @@ private struct TabStrip: View {
                 }
                 .buttonStyle(.plain)
             }
-            Spacer()
+            // No trailing Spacer: inside a horizontal ScrollView it claims
+            // infinite width and the strip stops laying out correctly.
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -590,26 +600,33 @@ private struct DownloadingTab: View {
             }
 
             Section("Accounts") {
-                LabeledContent("Wallhaven API key") {
-                    SecureField("optional — needed for NSFW", text: $settings.wallhavenAPIKey)
-                }
-                LabeledContent("Unsplash access key") {
-                    HStack {
-                        SecureField("paste your Access Key", text: $settings.unsplashAccessKey)
-                        Link("Get one", destination:
-                            URL(string: "https://unsplash.com/oauth/applications")!)
-                    }
-                }
-                Text("Unsplash is photography rather than digital art, so it is the source to use when Wallhaven returns too much AI and fantasy work. Register a free app, then copy its Access Key (not the Secret).")
-                    .font(.caption).foregroundStyle(.secondary)
-                LabeledContent("Reddit client ID") {
-                    SecureField("from reddit.com/prefs/apps", text: $settings.redditClientID)
-                }
-                LabeledContent("Reddit secret") {
-                    SecureField("", text: $settings.redditClientSecret)
-                }
-                Text("Reddit stopped serving anonymous requests in 2023; a free script app restores access.")
-                    .font(.caption).foregroundStyle(.secondary)
+                CredentialField(
+                    title: "Unsplash access key",
+                    prompt: "paste your Access Key here",
+                    value: $settings.unsplashAccessKey,
+                    help: "photography, not digital art",
+                    link: ("Register a free app",
+                           URL(string: "https://unsplash.com/oauth/applications")!))
+
+                CredentialField(
+                    title: "Wallhaven API key",
+                    prompt: "optional",
+                    value: $settings.wallhavenAPIKey,
+                    help: "only needed for NSFW and your own collections",
+                    link: ("Get key", URL(string: "https://wallhaven.cc/settings/account")!))
+
+                CredentialField(
+                    title: "Reddit client ID",
+                    prompt: "from a script app",
+                    value: $settings.redditClientID,
+                    link: ("reddit.com/prefs/apps",
+                           URL(string: "https://www.reddit.com/prefs/apps")!))
+
+                CredentialField(
+                    title: "Reddit secret",
+                    prompt: "",
+                    value: $settings.redditClientSecret,
+                    help: "Reddit stopped serving anonymous requests in 2023")
             }
 
             Section {
