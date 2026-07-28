@@ -24,6 +24,11 @@ enum WallpaperStore {
     /// The image file currently set, or nil when the desktop is on a dynamic
     /// system wallpaper (e.g. `com.apple.wallpaper.choice.sequoia`), which has
     /// no backing file we can point at.
+    ///
+    /// WallpaperAgent flushes this index asynchronously — measured at a second
+    /// or two behind `setDesktopImageURL`. Reading straight after a set will
+    /// often still show the previous value, so this is for reporting current
+    /// state, not for confirming a set succeeded.
     static func currentImageURL() -> URL? {
         guard
             let data = try? Data(contentsOf: indexURL),

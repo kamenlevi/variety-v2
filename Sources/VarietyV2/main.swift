@@ -7,6 +7,27 @@ let generatedDir = appSupport.appendingPathComponent("generated")
 
 let args = Array(CommandLine.arguments.dropFirst())
 
+/// Runs main-actor work to completion from a synchronous entry point.
+///
+/// Blocking on a semaphore here would deadlock: the main thread is the only
+/// place `@MainActor` work can run, so waiting on it guarantees it never does.
+/// Pumping the run loop instead lets the task be scheduled.
+func runPumpingMainRunLoop(_ work: @escaping @MainActor () async -> Void) {
+    let finished = Finished()
+    Task { @MainActor in
+        await work()
+        finished.value = true
+    }
+    while !finished.value {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+}
+
+/// Reference box so the flag survives being captured by the escaping task.
+final class Finished: @unchecked Sendable {
+    var value = false
+}
+
 switch args.first {
 case "--current":
     if let url = WallpaperStore.currentImageURL() {
@@ -38,6 +59,31 @@ case "--set":
 
 case "--selftest":
     exit(SelfTest.run() ? 0 : 1)
+
+case "--cycle":
+    // One complete pass — fetch, download, render, set — without starting the
+    // menu bar app. This is the end-to-end check.
+    //
+    // Note the run loop is *pumped* rather than blocked on a semaphore:
+    // Rotator is @MainActor, so parking the main thread would deadlock it —
+    // the work can only run on the thread the wait would be holding.
+    runPumpingMainRunLoop { @MainActor in
+        let rotator = Rotator(settings: Settings.load())
+        print("filling library…")
+        await rotator.refillIfNeeded()
+        print("downloaded: \(rotator.recentForDisplay().count) image(s)")
+        await rotator.next()
+        if let current = rotator.current {
+            print("showing: \(current.lastPathComponent)")
+            if let origin = rotator.currentOrigin {
+                print("  from: \(origin.sourceName)")
+                if let title = origin.title { print("  title: \(title)") }
+            }
+            print("on screen: \(WallpaperStore.currentImageURL()?.lastPathComponent ?? "unknown")")
+        } else {
+            print("no image was set")
+        }
+    }
 
 case "--render":
     // Renders every display mode plus the overlays from one source image, so
@@ -103,12 +149,29 @@ case "--probe-sources":
     }
     semaphore.wait()
 
-default:
+case "--help", "-h":
     print("""
     VarietyV2 — wallpaper manager for macOS
 
-      --set <image>   set the wallpaper
-      --current       print the wallpaper macOS actually has set
-      --selftest      run internal checks
+    Run with no arguments to start the menu bar app.
+
+      --set <image>        set the wallpaper immediately
+      --current            print the wallpaper macOS actually has set
+      --render <image>     render every display mode to files, for inspection
+      --probe-sources [id] fetch from the live image sources
+      --selftest           run internal checks
     """)
+
+default:
+    // No arguments: run the menu bar app.
+    // Top-level code is nonisolated, but this only ever runs on the main
+    // thread, so the assumption is sound.
+    let app = NSApplication.shared
+    let delegate = MainActor.assumeIsolated { AppDelegate() }
+    app.delegate = delegate
+    // Accessory, not regular: no Dock icon, no menu bar of its own. The
+    // bundle's LSUIElement covers this too, but setting it here means running
+    // the bare binary during development behaves the same way.
+    app.setActivationPolicy(.accessory)
+    app.run()
 }

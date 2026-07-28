@@ -176,6 +176,16 @@ final class Rotator {
         }.max { $0.width * $0.height < $1.width * $1.height }!
     }
 
+    // MARK: - Browsing
+
+    func favoritesForDisplay() -> [URL] { library.favorites() }
+    func recentForDisplay() -> [URL] { library.downloaded() }
+
+    /// Jump straight to a specific image, from the thumbnail strip.
+    func show(file: URL) async {
+        await show(file, recordHistory: true)
+    }
+
     // MARK: - Library actions
 
     func favoriteCurrent() {
