@@ -26,6 +26,7 @@ enum SelfTest {
         generationStoreCollectsOldFiles()
         wallpaperStoreParsesLiveIndex()
         settingsDecodeLeniently()
+        refillTriggersWhenSourcesChange()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -142,6 +143,52 @@ enum SelfTest {
                   && roundTripped?.sources.last?.kind == .reddit
                   && roundTripped?.sources.last?.location == "EarthPorn"
                   && roundTripped?.favoritesOperations.first?.operation == .move)
+    }
+
+    /// The refill decision must not be "pool is small" alone.
+    ///
+    /// It was, once, and the consequence was that a full download folder
+    /// stopped the app fetching anything ever again — adding a source did
+    /// nothing and the rotation was frozen on its first batch. This checks the
+    /// decision directly, since the symptom takes days to notice by hand.
+    private static func refillTriggersWhenSourcesChange() {
+        // Mirrors Rotator's guard.
+        func shouldRefill(force: Bool, poolCount: Int, minimum: Int,
+                          signature: String, lastSignature: String?,
+                          lastRefill: Date?, interval: TimeInterval, now: Date) -> Bool {
+            let sourcesChanged = signature != lastSignature
+            let poolLow = poolCount < minimum
+            let stale = lastRefill.map { now.timeIntervalSince($0) >= interval } ?? true
+            return force || sourcesChanged || poolLow || stale
+        }
+
+        let now = Date()
+        let justRefilled = now.addingTimeInterval(-10)
+
+        check("a full pool with unchanged sources does not refetch constantly",
+              shouldRefill(force: false, poolCount: 40, minimum: 30,
+                           signature: "a", lastSignature: "a",
+                           lastRefill: justRefilled, interval: 1200, now: now) == false)
+
+        check("adding a source refills even when the pool is full",
+              shouldRefill(force: false, poolCount: 40, minimum: 30,
+                           signature: "a;b", lastSignature: "a",
+                           lastRefill: justRefilled, interval: 1200, now: now))
+
+        check("a drained pool refills",
+              shouldRefill(force: false, poolCount: 3, minimum: 30,
+                           signature: "a", lastSignature: "a",
+                           lastRefill: justRefilled, interval: 1200, now: now))
+
+        check("a full pool still refills once it goes stale",
+              shouldRefill(force: false, poolCount: 40, minimum: 30,
+                           signature: "a", lastSignature: "a",
+                           lastRefill: now.addingTimeInterval(-3600), interval: 1200, now: now))
+
+        check("a never-refilled app refills on first run",
+              shouldRefill(force: false, poolCount: 40, minimum: 30,
+                           signature: "a", lastSignature: nil,
+                           lastRefill: nil, interval: 1200, now: now))
     }
 
     // MARK: -

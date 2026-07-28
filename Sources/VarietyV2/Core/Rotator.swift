@@ -23,6 +23,10 @@ final class Rotator {
     private var quoteTimer: Timer?
     private var currentQuote: Quote?
     private var fetching = false
+    private var lastRefill: Date?
+    /// Identifies the enabled source set, so adding or editing one forces a
+    /// fetch instead of waiting for the pool to drain.
+    private var lastSourceSignature: String?
 
     var onChange: (() -> Void)?
 
@@ -102,6 +106,7 @@ final class Rotator {
         let foldersChanged = new.downloadFolder != settings.downloadFolder
             || new.favoritesFolder != settings.favoritesFolder
             || new.fetchedFolder != settings.fetchedFolder
+        let sourcesChanged = new.sources != settings.sources
 
         settings = new
         try? new.save()
@@ -110,6 +115,21 @@ final class Rotator {
         scheduleRotation()
         scheduleClock()
         scheduleQuoteChange()
+
+        // Turning on a source or adding a search should fetch from it now,
+        // not whenever the pool next happens to run down.
+        if sourcesChanged || foldersChanged {
+            Task { await refillIfNeeded(force: true) }
+        }
+    }
+
+    /// The enabled sources, as a value that changes whenever they do.
+    private func sourceSignature() -> String {
+        settings.sources
+            .filter(\.enabled)
+            .map(\.id)
+            .sorted()
+            .joined(separator: ";")
     }
 
     var isPaused: Bool { !settings.changeEnabled }
@@ -277,12 +297,39 @@ final class Rotator {
 
     // MARK: - Fetching
 
-    func refillIfNeeded(minimum: Int = 30) async {
+    /// How long a full pool stays fresh before topping it up anyway.
+    private static let refillInterval: TimeInterval = 20 * 60
+
+    /// Tops up the candidate pool.
+    ///
+    /// The condition here is deliberately *not* just "the pool is small". An
+    /// earlier version guarded on `downloaded().count < minimum` alone, which
+    /// meant that once the folder filled up the app stopped downloading
+    /// permanently — adding a new source could never bring in anything new,
+    /// and the rotation was stuck on whatever it happened to fetch first.
+    ///
+    /// A refill now happens when any of these is true:
+    ///   - the enabled source list has changed since the last fetch
+    ///   - the pool has dropped below `minimum`
+    ///   - it has simply been a while
+    ///   - the caller forced it
+    func refillIfNeeded(force: Bool = false, minimum: Int = 30) async {
         guard !fetching else { return }
         guard settings.internetEnabled else { return }
-        guard library.downloaded().count < minimum else { return }
+
+        let signature = sourceSignature()
+        let sourcesChanged = signature != lastSourceSignature
+        let poolLow = library.downloaded().count < minimum
+        let stale = lastRefill.map { Date().timeIntervalSince($0) >= Self.refillInterval } ?? true
+
+        guard force || sourcesChanged || poolLow || stale else { return }
+
         fetching = true
-        defer { fetching = false }
+        defer {
+            fetching = false
+            lastRefill = Date()
+            lastSourceSignature = signature
+        }
 
         let downloaders = SourceRegistry.activeDownloaders(settings: settings)
         guard !downloaders.isEmpty else { return }

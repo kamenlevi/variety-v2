@@ -272,6 +272,12 @@ private struct AddSourceSheet: View {
                 Text("No configuration needed.").foregroundStyle(.secondary)
             }
 
+            if let validationMessage {
+                Label(validationMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             HStack {
                 Spacer()
                 Button("Cancel", action: cancel)
@@ -279,11 +285,43 @@ private struct AddSourceSheet: View {
                     add(Source(enabled: true, kind: kind, location: location))
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(kind.isEditable && location.isEmpty && kind != .unsplash)
+                .disabled(!isValid)
             }
         }
         .padding()
         .frame(width: 460)
+    }
+
+    /// A path source has to point at something that exists. Without this a
+    /// search term typed into the default "Folder of images" row becomes a
+    /// source pointing at a folder that was never there, which then silently
+    /// contributes nothing.
+    private var pathExists: Bool {
+        var isDirectory: ObjCBool = false
+        let expanded = (location as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory)
+        else { return false }
+        return kind == .folder ? isDirectory.boolValue : !isDirectory.boolValue
+    }
+
+    private var isValid: Bool {
+        switch kind {
+        case .folder, .image: return !location.isEmpty && pathExists
+        case .artstation, .unsplash: return true          // blank means Trending / random
+        case .wallhaven, .reddit, .mediarss: return !location.isEmpty
+        default: return true
+        }
+    }
+
+    private var validationMessage: String? {
+        guard !location.isEmpty else { return nil }
+        switch kind {
+        case .folder where !pathExists:
+            return "No folder at that path. To search a website for “\(location)”, use Search instead."
+        case .image where !pathExists:
+            return "No file at that path."
+        default: return nil
+        }
     }
 
     private var placeholder: String {
