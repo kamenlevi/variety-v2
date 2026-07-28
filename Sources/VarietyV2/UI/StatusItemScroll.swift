@@ -21,8 +21,14 @@ final class StatusItemScrollHandler: NSView {
 
     /// Rate limit, since even with a threshold a long scroll would queue up
     /// more changes than anyone wants.
+    ///
+    /// Set from the fade duration rather than fixed: a change requested before
+    /// the previous transition has finished animates over it, which flickers.
     private var lastFired = Date.distantPast
-    private static let minimumInterval: TimeInterval = 0.35
+    var minimumInterval: TimeInterval = 0.35
+    /// Asked before firing, so a slow render throttles the scroll rather than
+    /// queueing behind it.
+    var isBusy: () -> Bool = { false }
 
     override func scrollWheel(with event: NSEvent) {
         // Vertical wins when the gesture is mostly vertical; horizontal
@@ -39,7 +45,7 @@ final class StatusItemScrollHandler: NSView {
         guard abs(accumulated) >= Self.threshold else { return }
 
         let now = Date()
-        guard now.timeIntervalSince(lastFired) >= Self.minimumInterval else {
+        guard now.timeIntervalSince(lastFired) >= minimumInterval, !isBusy() else {
             accumulated = 0
             return
         }

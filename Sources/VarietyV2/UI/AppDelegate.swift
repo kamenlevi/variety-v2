@@ -42,6 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 on: button,
                 next: { [weak self] in Task { @MainActor in await self?.rotator.next() } },
                 previous: { [weak self] in Task { @MainActor in await self?.rotator.previous() } })
+            // Pace scrolling against the transition, so one change finishes
+            // before the next begins.
+            scrollHandler?.minimumInterval = max(0.35, settings.wallpaperFade.duration + 0.2)
+            scrollHandler?.isBusy = { [weak self] in self?.rotator.isBusy ?? false }
         }
 
         // Re-tint when the system flips between light and dark.
@@ -292,6 +296,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.rotator.applySettings(updated)
             self.statusItem.button?.image = Self.statusIcon(preference: updated.icon)
+            self.scrollHandler?.minimumInterval =
+                max(0.35, updated.wallpaperFade.duration + 0.2)
             Task { await self.rotator.redrawCurrent() }
         }
 

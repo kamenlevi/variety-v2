@@ -30,6 +30,13 @@ final class Rotator {
     /// The rendered file currently on screen — the starting point for a fade.
     private var lastShownGeneration: URL?
     private let fadeOverlay = FadeOverlay()
+    /// True while a change is being rendered and applied.
+    ///
+    /// Scrolling the menu bar icon can ask for a change every 0.35 s, but each
+    /// one renders a full-resolution wallpaper and runs a fade. Without this
+    /// the requests pile up, several transitions animate over each other and
+    /// the result flickers.
+    private var isChanging = false
 
     var onChange: (() -> Void)?
 
@@ -187,6 +194,10 @@ final class Rotator {
             .joined(separator: ";")
     }
 
+    /// Whether a change is currently being rendered — the scroll handler uses
+    /// this to pace itself against actual work rather than a fixed timer.
+    var isBusy: Bool { isChanging }
+
     var isPaused: Bool { !settings.changeEnabled }
 
     func setPaused(_ paused: Bool) {
@@ -340,6 +351,10 @@ final class Rotator {
     // MARK: - Applying
 
     private func show(_ file: URL, recordHistory: Bool, newEffect: Bool) async {
+        guard !isChanging else { return }
+        isChanging = true
+        defer { isChanging = false }
+
         let target = Self.targetSize()
 
         if newEffect {
