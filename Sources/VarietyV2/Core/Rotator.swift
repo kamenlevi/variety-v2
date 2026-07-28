@@ -27,15 +27,39 @@ final class Rotator {
     /// Identifies the enabled source set, so adding or editing one forces a
     /// fetch instead of waiting for the pool to drain.
     private var lastSourceSignature: String?
+    /// The rendered file currently on screen — the starting point for a fade.
+    private var lastShownGeneration: URL?
 
     var onChange: (() -> Void)?
 
     init(settings: Settings) {
         self.settings = settings
         self.library = ImageLibrary(settings: settings)
+        // Retention has to clear a whole fade plus the previous wallpaper: a
+        // slow fade writes ten frames and a destination, and if the outgoing
+        // image is pruned in that flurry the *next* fade has nothing to start
+        // from and silently falls back to a hard cut.
         self.generations = GenerationStore(
             directory: URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent("Library/Application Support/VarietyV2/generated"))
+                .appendingPathComponent("Library/Application Support/VarietyV2/generated"),
+            retain: 24)
+
+        // Restore what was showing and where the user had browsed to. Without
+        // this the menu has no image section until the first rotation, and
+        // History is empty on every launch.
+        let state = RotationState.load()
+        history = state.history.map { URL(fileURLWithPath: $0) }
+        historyIndex = min(state.index, history.count - 1)
+        current = state.current.map { URL(fileURLWithPath: $0) }
+        currentOrigin = current.flatMap { library.metadata(for: $0) }
+    }
+
+    private func persistState() {
+        RotationState(
+            history: history.suffix(RotationState.maxHistory).map(\.path),
+            index: min(historyIndex, history.count - 1),
+            current: current?.path
+        ).save()
     }
 
     // MARK: - Lifecycle
@@ -277,7 +301,19 @@ final class Rotator {
 
         do {
             try ImagePipeline.render(request, to: destination)
+
+            // Crossfade from what is on screen, when asked for.
+            let fadeFrames = Crossfade.renderFrames(
+                from: lastShownGeneration, to: destination, size: target,
+                speed: settings.wallpaperFade, store: generations)
+
+            for frame in fadeFrames {
+                try? WallpaperSetter.apply(url: frame)
+                try? await Task.sleep(for: .seconds(settings.wallpaperFade.frameInterval))
+            }
+
             try WallpaperSetter.apply(url: destination)
+            lastShownGeneration = destination
 
             current = file
             currentOrigin = library.metadata(for: file)
@@ -291,6 +327,7 @@ final class Rotator {
                 historyIndex = history.count - 1
             }
             generations.collect(keeping: destination)
+            persistState()
             onChange?()
             // Variety triggers a download a couple of seconds after each
             // change, so fetching happens in the gaps rather than in bursts.

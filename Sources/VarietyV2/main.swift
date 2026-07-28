@@ -118,6 +118,27 @@ case "--search":
     }
     searchSemaphore.wait()
 
+case "--fadetest":
+    // Renders a crossfade between two library images and reports the frames.
+    do {
+        let settings = Settings.load()
+        let files = SourceRegistry.imageFiles(in: settings.downloadFolderURL)
+        guard files.count >= 2 else {
+            print("need at least two downloaded images"); exit(1)
+        }
+        let store = GenerationStore(directory: generatedDir, retain: 40)
+        for speed in FadeSpeed.allCases {
+            let started = Date()
+            let frames = Crossfade.renderFrames(
+                from: files[0], to: files[1],
+                size: ScreenGeometry.largestPixelSize, speed: speed, store: store)
+            let ms = Date().timeIntervalSince(started) * 1000
+            let playback = Double(frames.count) * speed.frameInterval
+            print(String(format: "  %-8@ %2d frame(s), rendered in %5.0f ms, plays over %.1fs",
+                         speed.rawValue as NSString, frames.count, ms, playback))
+        }
+    }
+
 case "--selftest":
     exit(SelfTest.run() ? 0 : 1)
 

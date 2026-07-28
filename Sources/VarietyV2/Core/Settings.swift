@@ -51,6 +51,8 @@ struct Settings: Codable {
     // MARK: Wallpaper
 
     var wallpaperAutoRotate = true
+    /// How the wallpaper transitions when it changes.
+    var wallpaperFade = FadeSpeed.system
     /// Variety defaults to "os" and lets the desktop environment decide. macOS
     /// scales crudely, so the default here is "smart": zoom when the image's
     /// shape is close to the screen's, blurred fill when cropping would lose
@@ -212,6 +214,7 @@ struct Settings: Codable {
         favoritesOperations = v(.favoritesOperations, d.favoritesOperations)
 
         wallpaperAutoRotate = v(.wallpaperAutoRotate, d.wallpaperAutoRotate)
+        wallpaperFade = v(.wallpaperFade, d.wallpaperFade)
         wallpaperDisplayMode = v(.wallpaperDisplayMode, d.wallpaperDisplayMode)
 
         fetchedFolder = v(.fetchedFolder, d.fetchedFolder)
@@ -277,6 +280,40 @@ struct Settings: Codable {
 }
 
 // MARK: - Supporting types
+
+/// Crossfade between the outgoing and incoming wallpaper.
+///
+/// macOS cross-fades once per change on its own and offers no control over it.
+/// Anything beyond `.system` is rendered here: blended frames are written to
+/// successive files and set in turn. Measured on this machine, WallpaperAgent
+/// accepts roughly ten sets per second, so a rendered fade is stepped rather
+/// than smooth — the system's own crossfade between each step softens it, but
+/// it will not look like a video dissolve.
+enum FadeSpeed: String, Codable, CaseIterable {
+    case system, fast, medium, slow
+
+    var displayName: String {
+        switch self {
+        case .system: return "System default (no extra fade)"
+        case .fast: return "Fast"
+        case .medium: return "Medium"
+        case .slow: return "Slow"
+        }
+    }
+
+    /// Intermediate frames to render. Zero means hand the image straight over.
+    var steps: Int {
+        switch self {
+        case .system: return 0
+        case .fast: return 3
+        case .medium: return 6
+        case .slow: return 10
+        }
+    }
+
+    /// Seconds between frames, kept at the measured ceiling of ~10 per second.
+    var frameInterval: TimeInterval { 0.1 }
+}
 
 enum LightnessMode: String, Codable, CaseIterable {
     case dark, light

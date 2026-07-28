@@ -42,6 +42,11 @@ VERSION=$(git describe --tags --always 2>/dev/null || echo "0.1.0")
 if [[ -f "$ROOT/Resources/Variety.icns" ]]; then
     cp "$ROOT/Resources/Variety.icns" "$APP/Contents/Resources/Variety.icns"
 fi
+# The SVG ships too: the status item renders it at menu-bar size so the tray
+# icon is Variety's actual artwork rather than an approximation.
+if [[ -f "$ROOT/Resources/variety.svg" ]]; then
+    cp "$ROOT/Resources/variety.svg" "$APP/Contents/Resources/variety.svg"
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

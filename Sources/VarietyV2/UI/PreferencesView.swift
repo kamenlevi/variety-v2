@@ -415,6 +415,17 @@ private struct WallpaperTab: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Transition") {
+                Picker("Fade between wallpapers", selection: $settings.wallpaperFade) {
+                    ForEach(FadeSpeed.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.inline)
+
+                Text("macOS cross-fades once per change and offers no control over it, so anything beyond the system default is rendered here: blended frames are written and shown in turn. WallpaperAgent accepts about ten frames a second, so a longer fade is stepped rather than perfectly smooth.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section {
                 Toggle("Also set the lock screen wallpaper", isOn: $settings.changeLockScreen)
                 Text("macOS ties the lock screen to the desktop wallpaper for the logged-in user, so this has no separate effect here. Kept for parity with the Linux build.")

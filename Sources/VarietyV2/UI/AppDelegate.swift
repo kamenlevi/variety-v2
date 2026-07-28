@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesWindow: NSWindow?
     private var filmstrip: FilmstripPanel?
     private var searchWindow: NSWindow?
+    private var selectorWindow: NSWindow?
     private var slideshow: SlideshowController?
     private var menuTargets: [ClosureMenuItem] = []
 
@@ -30,11 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "photo.on.rectangle.angled",
-                                   accessibilityDescription: "Variety")
-            button.image?.isTemplate = true
-        }
+        statusItem.button?.image = Self.statusIcon()
 
         // Without a main menu there is no Edit menu, and therefore no working
         // Cut/Copy/Paste in any text field the app shows.
@@ -42,6 +39,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         rebuildMenu()
         rotator.start()
+    }
+
+    /// Variety's own icon, at menu bar size.
+    ///
+    /// Deliberately *not* a template image. A template uses only the alpha
+    /// channel, and this icon's alpha is the whole monitor silhouette, so it
+    /// would render as a featureless black slab. Drawn in colour it is the
+    /// actual Variety mark, which is what it should be — at the cost of not
+    /// inverting automatically in dark mode, which it does not need to since
+    /// the artwork carries its own dark outline.
+    private static func statusIcon() -> NSImage {
+        let height: CGFloat = 18
+
+        if let url = Bundle.main.url(forResource: "variety", withExtension: "svg"),
+           let source = NSImage(contentsOf: url) {
+            let aspect = source.size.height > 0 ? source.size.width / source.size.height : 1
+            let size = NSSize(width: height * aspect, height: height)
+
+            let image = NSImage(size: size, flipped: false) { rect in
+                source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                return true
+            }
+            image.isTemplate = false
+            return image
+        }
+
+        // Running from the bare binary during development, where there is no
+        // bundle to read resources from.
+        let fallback = NSImage(systemSymbolName: "photo.on.rectangle.angled",
+                               accessibilityDescription: "Variety")!
+        fallback.isTemplate = true
+        return fallback
     }
 
     // MARK: - Menu
@@ -55,35 +84,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        if let current = rotator.current {
-            let name = NSMenuItem(title: current.lastPathComponent, action: nil, keyEquivalent: "")
-            name.isEnabled = false
-            menu.addItem(name)
+        // The per-image section is always present, disabled when there is
+        // nothing to act on. Hiding it entirely — which is what happened when
+        // no wallpaper had been set yet this session — made the menu appear to
+        // lose features at random.
+        let current = rotator.current
+        let name = NSMenuItem(title: current?.lastPathComponent ?? "No wallpaper set yet",
+                              action: nil, keyEquivalent: "")
+        name.isEnabled = false
+        menu.addItem(name)
 
-            if let origin = rotator.currentOrigin, origin.originURL != nil {
-                add(menu, "View at \(origin.sourceName)", key: "") { [weak self] in
-                    self?.rotator.openCurrentOrigin()
-                }
+        if let origin = rotator.currentOrigin, origin.originURL != nil {
+            add(menu, "View at \(origin.sourceName)", key: "") { [weak self] in
+                self?.rotator.openCurrentOrigin()
             }
-
-            let isFavorite = rotator.currentIsFavorite
-            add(menu, isFavorite ? "Already in Favorites" : "Move to Favorites",
-                key: "f", enabled: !isFavorite) { [weak self] in
-                self?.rotator.favoriteCurrent()
-            }
-            add(menu, "Delete to Trash", key: "d") { [weak self] in
-                Task { await self?.rotator.trashCurrent() }
-            }
-
-            menu.addItem(.separator())
-            menu.addItem(imageSubmenuItem())
         }
+
+        let isFavorite = rotator.currentIsFavorite
+        add(menu, isFavorite ? "Already in Favorites" : "Move to Favorites",
+            key: "f", enabled: current != nil && !isFavorite) { [weak self] in
+            self?.rotator.favoriteCurrent()
+        }
+        add(menu, "Delete to Trash", key: "d", enabled: current != nil) { [weak self] in
+            Task { await self?.rotator.trashCurrent() }
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(imageSubmenuItem(enabled: current != nil))
 
         menu.addItem(.separator())
 
         add(menu, "Find Images…", key: "k") { [weak self] in self?.showSearch() }
-        add(menu, "History", key: "h") { [weak self] in self?.showFilmstrip(.history) }
-        add(menu, "Wallpaper Selector", key: "l") { [weak self] in self?.showFilmstrip(.selector) }
+        menu.addItem(historyMenuItem())
+        add(menu, "Wallpaper Selector…", key: "l") { [weak self] in self?.showSelector() }
         add(menu, "Recent Downloads", key: "j") { [weak self] in self?.showFilmstrip(.downloads) }
 
         menu.addItem(.separator())
@@ -111,9 +144,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
+    /// History as an actual list you can jump around in.
+    ///
+    /// It used to be a single item that opened the filmstrip — which was empty
+    /// after every relaunch, since history lived only in memory. Now the state
+    /// persists, and the recent entries are right here with their thumbnails,
+    /// so going back two wallpapers takes one click rather than opening a strip
+    /// and hunting.
+    private func historyMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        let entries = rotator.historyForDisplay
+        if entries.isEmpty {
+            let empty = NSMenuItem(title: "Nothing yet", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            submenu.addItem(empty)
+        } else {
+            for file in entries.prefix(15) {
+                let entry = NSMenuItem(title: Self.menuTitle(for: file),
+                                       action: #selector(ClosureMenuItem.invoke),
+                                       keyEquivalent: "")
+                let target = ClosureMenuItem { [weak self] in
+                    Task { await self?.rotator.show(file: file) }
+                }
+                entry.target = target
+                entry.image = Self.menuThumbnail(for: file)
+                entry.state = (file == rotator.current) ? .on : .off
+                menuTargets.append(target)
+                submenu.addItem(entry)
+            }
+
+            submenu.addItem(.separator())
+            let strip = NSMenuItem(title: "Show as Filmstrip…",
+                                   action: #selector(ClosureMenuItem.invoke), keyEquivalent: "")
+            let target = ClosureMenuItem { [weak self] in self?.showFilmstrip(.history) }
+            strip.target = target
+            menuTargets.append(target)
+            submenu.addItem(strip)
+        }
+
+        item.submenu = submenu
+        return item
+    }
+
+    /// A short, readable name — download filenames are long and id-shaped.
+    private static func menuTitle(for file: URL) -> String {
+        let stem = file.deletingPathExtension().lastPathComponent
+        return stem.count > 45 ? String(stem.prefix(42)) + "…" : stem
+    }
+
+    private static func menuThumbnail(for file: URL) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(file as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 64,
+              ] as CFDictionary)
+        else { return nil }
+
+        let image = NSImage(cgImage: cg, size: .zero)
+        let height: CGFloat = 24
+        let aspect = image.size.height > 0 ? image.size.width / image.size.height : 1.6
+        image.size = NSSize(width: height * aspect, height: height)
+        return image
+    }
+
     /// Variety's "Image ▸" submenu of per-image actions.
-    private func imageSubmenuItem() -> NSMenuItem {
+    private func imageSubmenuItem(enabled: Bool = true) -> NSMenuItem {
         let item = NSMenuItem(title: "Image", action: nil, keyEquivalent: "")
+        item.isEnabled = enabled
         let submenu = NSMenu()
 
         add(submenu, "Show in Finder", key: "") { [weak self] in self?.rotator.revealCurrent() }
@@ -178,6 +278,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contents = contents
         panel.reload()
         panel.present()
+    }
+
+    /// The browsable grid of everything the enabled sources offer.
+    private func showSelector() {
+        if let selectorWindow {
+            WindowPresenter.shared.present(selectorWindow)
+            return
+        }
+        let window = WindowPresenter.shared.makeWindow(
+            title: "Wallpaper Selector",
+            // Sized for browsing: the old window was too small to judge more
+            // than a handful of wallpapers at a time.
+            size: NSSize(width: 1180, height: 780),
+            minSize: NSSize(width: 700, height: 480))
+        window.contentView = NSHostingView(rootView: WallpaperSelectorView(rotator: rotator))
+        WindowPresenter.shared.present(window)
+        selectorWindow = window
     }
 
     /// Search a service by subject and add it to the rotation.
