@@ -14,7 +14,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var rotator: Rotator!
     private var preferencesWindow: NSWindow?
     private var filmstrip: FilmstripPanel?
-    private var selectorWindow: NSWindow?
     private var searchWindow: NSWindow?
     private var slideshow: SlideshowController?
     private var menuTargets: [ClosureMenuItem] = []
@@ -84,7 +83,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         add(menu, "Find Images…", key: "k") { [weak self] in self?.showSearch() }
         add(menu, "History", key: "h") { [weak self] in self?.showFilmstrip(.history) }
-        add(menu, "Wallpaper Selector", key: "l") { [weak self] in self?.showSelector() }
+        add(menu, "Wallpaper Selector", key: "l") { [weak self] in self?.showFilmstrip(.selector) }
+        add(menu, "Recent Downloads", key: "j") { [weak self] in self?.showFilmstrip(.downloads) }
 
         menu.addItem(.separator())
 
@@ -202,18 +202,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         searchWindow = window
     }
 
-    private func showSelector() {
-        if let selectorWindow {
-            WindowPresenter.shared.present(selectorWindow)
-            return
-        }
-        let view = WallpaperSelectorView(rotator: rotator)
-        let window = WindowPresenter.shared.makeWindow(
-            title: "Wallpaper Selector", size: NSSize(width: 980, height: 660))
-        window.contentView = NSHostingView(rootView: view)
-        WindowPresenter.shared.present(window)
-        selectorWindow = window
-    }
 
     private func toggleSlideshow() {
         if let slideshow, slideshow.isRunning {

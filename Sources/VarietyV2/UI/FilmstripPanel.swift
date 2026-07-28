@@ -14,13 +14,26 @@ import AppKit
 @MainActor
 final class FilmstripPanel: NSPanel {
 
-    enum Contents: Equatable { case recent, history, favorites }
+    /// Variety drives one filmstrip from three menu items — History, Wallpaper
+    /// Selector and Recent Downloads — differing only in what they list.
+    enum Contents: Equatable {
+        case history, selector, downloads, favorites
+
+        var title: String {
+            switch self {
+            case .history: return "History"
+            case .selector: return "Wallpaper Selector"
+            case .downloads: return "Recent Downloads"
+            case .favorites: return "Favorites"
+            }
+        }
+    }
 
     private let rotator: Rotator
     private let scroll = NSScrollView()
     private let strip = NSStackView()
 
-    var contents: Contents = .recent
+    var contents: Contents = .selector
 
     private let thumbHeight: CGFloat = 120
     private let maxThumbnails = 60
@@ -80,10 +93,14 @@ final class FilmstripPanel: NSPanel {
 
         let files: [URL]
         switch contents {
-        case .recent:
-            files = rotator.favoritesForDisplay() + rotator.recentForDisplay()
         case .history:
             files = rotator.historyForDisplay
+        case .selector:
+            // Everything the enabled sources currently offer — Variety builds
+            // this from the checked rows of the Images table.
+            files = rotator.selectableFromSources()
+        case .downloads:
+            files = rotator.recentForDisplay()
         case .favorites:
             files = rotator.favoritesForDisplay()
         }

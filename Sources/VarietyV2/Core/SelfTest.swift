@@ -29,6 +29,7 @@ enum SelfTest {
         refillTriggersWhenSourcesChange()
         wallhavenPhrasesBecomeTags()
         wallhavenRelaxationLadder()
+        preparedBufferCoversEverythingBeforeRepeating()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -229,6 +230,71 @@ enum SelfTest {
         // back — an exclusion silently dropped would change what they asked for.
         check("operator syntax is not relaxed",
               WallhavenSource.relaxations(of: "-anime forest") == ["-anime forest"])
+    }
+
+    /// The property that makes a rotation feel unsupervised: every image is
+    /// shown once before any is shown twice.
+    ///
+    /// Random sampling — the previous behaviour — fails this badly. With 40
+    /// images, drawing at random needs about 170 draws to cover them all, and
+    /// some are shown five or six times before others appear at all. Consuming
+    /// from a shuffled buffer covers them in exactly 40.
+    private static func preparedBufferCoversEverythingBeforeRepeating() {
+        // Mirrors Rotator's buffer discipline.
+        struct Buffer {
+            var pool: [Int]
+            var prepared: [Int] = []
+            var current: Int?
+
+            mutating func next() -> Int? {
+                let threshold = min(10, max(1, pool.count / 2))
+                if prepared.count <= threshold {
+                    let queued = Set(prepared)
+                    prepared.append(contentsOf: pool.filter { !queued.contains($0) }.shuffled())
+                }
+                while !prepared.isEmpty {
+                    let candidate = prepared.removeFirst()
+                    if candidate != current { current = candidate; return candidate }
+                }
+                return nil
+            }
+        }
+
+        let poolSize = 40
+        var buffer = Buffer(pool: Array(0..<poolSize))
+
+        var counts: [Int: Int] = [:]
+        for _ in 0..<poolSize {
+            guard let picked = buffer.next() else { break }
+            counts[picked, default: 0] += 1
+        }
+
+        check("every image appears within one pass of the library",
+              counts.keys.count == poolSize)
+        check("no image repeats before the pass completes",
+              counts.values.allSatisfy { $0 == 1 })
+
+        // Beyond the first pass the buffer is topped up before it empties, so
+        // images already shown are reintroduced and repeats become possible —
+        // that is true of Variety too, and is the point of a *rolling* buffer
+        // rather than strict epochs. What matters is that it never stalls and
+        // stays well spread.
+        var later: [Int] = []
+        for _ in 0..<(poolSize * 3) {
+            guard let picked = buffer.next() else { break }
+            later.append(picked)
+        }
+        check("rotation never stalls after the first pass",
+              later.count == poolSize * 3)
+        check("continued rotation still spans the library",
+              Set(later).count == poolSize)
+
+        // The property that actually prevents the "same few images" feeling:
+        // no image dominates.
+        let tally = later.reduce(into: [Int: Int]()) { $0[$1, default: 0] += 1 }
+        let mostFrequent = tally.values.max() ?? 0
+        check("no image is over-represented (max \(mostFrequent) of 3 expected)",
+              mostFrequent <= 6)
     }
 
     // MARK: -

@@ -131,6 +131,7 @@ final class Rotator {
         // Turning on a source or adding a search should fetch from it now,
         // not whenever the pool next happens to run down.
         if sourcesChanged || foldersChanged {
+            invalidatePrepared()
             Task { await refillIfNeeded(force: true) }
         }
     }
@@ -166,24 +167,73 @@ final class Rotator {
         await show(pick, recordHistory: true, newEffect: true)
     }
 
-    /// Variety biases towards freshly downloaded images over the local pool via
-    /// `download_preference_ratio`, and shows *unseen* downloads in preference
-    /// to ones already displayed — otherwise a newly added source might not
-    /// surface for hours behind a large existing pool.
-    private func pickNext() -> URL? {
-        let unseen = library.unseenFiles()
-        let downloaded = library.downloaded()
-        let local = SourceRegistry.activeLocalFiles(settings: settings)
+    /// A shuffled buffer of images not yet shown this pass.
+    ///
+    /// This is Variety's `prepared` list, and the reason its rotation feels
+    /// like something you never have to think about. Images are *consumed*
+    /// from the buffer rather than sampled at random each time, so everything
+    /// eligible is shown once before anything repeats. Random sampling — which
+    /// is what this did before — repeats images constantly and can leave parts
+    /// of a library unseen indefinitely, which is what makes a rotation feel
+    /// like it needs supervising.
+    private var prepared: [URL] = []
 
-        let fromNetwork = !unseen.isEmpty ? unseen : downloaded
+    /// Refill when the buffer runs low, as Variety does at
+    /// `min(10, image_count // 2)`.
+    private func refillPreparedIfNeeded() {
+        let pool = eligiblePool()
+        let threshold = min(10, max(1, pool.count / 2))
+        guard prepared.count <= threshold else { return }
 
-        if !fromNetwork.isEmpty, !local.isEmpty {
-            return Double.random(in: 0...1) < settings.downloadPreferenceRatio
-                ? fromNetwork.randomElement()
-                : local.randomElement()
-        }
-        return fromNetwork.randomElement() ?? local.randomElement()
+        // Everything not already queued, reshuffled. Excluding what is still
+        // pending stops a refill from re-adding images about to be shown.
+        let queued = Set(prepared.map(\.path))
+        var fresh = pool.filter { !queued.contains($0.path) }
+        fresh.shuffle()
+        prepared.append(contentsOf: fresh)
     }
+
+    /// Every image the enabled sources currently offer.
+    private func eligiblePool() -> [URL] {
+        var pool = library.downloaded()
+        pool += SourceRegistry.activeLocalFiles(settings: settings)
+        var seen = Set<String>()
+        return pool.filter { seen.insert($0.standardizedFileURL.path).inserted }
+    }
+
+    /// Takes the next image from the buffer.
+    ///
+    /// Before drawing, and with probability `downloadPreferenceRatio`, a random
+    /// unseen download jumps the queue — Variety inserts one at position 0 for
+    /// the same reason: something just fetched should appear soon rather than
+    /// waiting behind everything already on disk.
+    private func pickNext() -> URL? {
+        refillPreparedIfNeeded()
+
+        if Double.random(in: 0...1) < settings.downloadPreferenceRatio {
+            let unseen = library.unseenFiles().filter { $0 != current }
+            if let jumper = unseen.randomElement() {
+                prepared.removeAll { $0 == jumper }
+                prepared.insert(jumper, at: 0)
+            }
+        }
+
+        while !prepared.isEmpty {
+            let candidate = prepared.removeFirst()
+            guard candidate != current,
+                  FileManager.default.isReadableFile(atPath: candidate.path)
+            else { continue }
+            return candidate
+        }
+
+        // Buffer exhausted and nothing refillable — fall back to anything at
+        // all rather than leaving the wallpaper stuck.
+        return eligiblePool().first { $0 != current }
+    }
+
+    /// Called when the source list or folders change: the buffer describes the
+    /// old configuration and would keep serving from it.
+    private func invalidatePrepared() { prepared.removeAll() }
 
     func previous() async {
         guard historyIndex > 0 else { return }
@@ -270,10 +320,13 @@ final class Rotator {
     func fetchedForDisplay() -> [URL] { library.fetched() }
     var historyForDisplay: [URL] { history.reversed() }
 
-    /// Everything the Wallpaper Selector can offer.
-    func allSelectable() -> [URL] {
-        library.favorites() + library.downloaded() + library.fetched()
-            + SourceRegistry.activeLocalFiles(settings: settings)
+    /// Everything the enabled sources currently offer — what the Wallpaper
+    /// Selector lists.
+    func selectableFromSources() -> [URL] {
+        var files = library.favorites() + library.downloaded() + library.fetched()
+        files += SourceRegistry.activeLocalFiles(settings: settings)
+        var seen = Set<String>()
+        return files.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
     // MARK: - Library actions
