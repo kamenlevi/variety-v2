@@ -31,6 +31,7 @@ enum SelfTest {
         wallhavenRelaxationLadder()
         preparedBufferCoversEverythingBeforeRepeating()
         donationDetailsAreUpstream()
+        fadeFramesAreBounded()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -315,6 +316,28 @@ enum SelfTest {
               DonateTab.payPalURL.host == "www.paypal.com")
         check("Bitcoin wallet matches upstream",
               DonateTab.bitcoinAddress == "bc1qgxlvmwe2pj5lvku6vm53edes3q7c3ykta7xyu4")
+    }
+
+    /// A fade must not outrun the generation store.
+    ///
+    /// Each frame is a file, and if a fade writes more files than the store
+    /// retains, it prunes the outgoing wallpaper mid-sequence and the *next*
+    /// fade has nothing to start from — it degrades to a hard cut with no
+    /// error anywhere.
+    private static func fadeFramesAreBounded() {
+        let rotatorRetain = 24    // must match Rotator's GenerationStore
+
+        for speed in FadeSpeed.allCases {
+            // frames + the destination itself
+            let perChange = speed.steps + 1
+            check("\(speed.rawValue) fade (\(perChange) files) fits within retention of \(rotatorRetain)",
+                  perChange < rotatorRetain)
+        }
+
+        check("system default writes no fade frames", FadeSpeed.system.steps == 0)
+        check("fade speeds increase in duration",
+              FadeSpeed.fast.steps < FadeSpeed.medium.steps
+                  && FadeSpeed.medium.steps < FadeSpeed.slow.steps)
     }
 
     // MARK: -

@@ -16,9 +16,12 @@ struct ImageSearchView: View {
     let settings: Settings
     /// Called with the source to add to the rotation.
     let onAdd: (Source) -> Void
+    /// Pre-filled query, from "More Like This". Searches on appear.
+    var initial: (service: Service, query: String, because: String)?
 
     @State private var service: Service = .wallhaven
     @State private var query = ""
+    @State private var didAutoSearch = false
     @State private var results: [RemoteImage] = []
     @State private var state: SearchState = .idle
     @State private var searchTask: Task<Void, Never>?
@@ -68,6 +71,13 @@ struct ImageSearchView: View {
             footer
         }
         .frame(width: 760, height: 560)
+        .task {
+            guard let initial, !didAutoSearch else { return }
+            didAutoSearch = true
+            service = initial.service
+            query = initial.query
+            search()
+        }
     }
 
     // MARK: - Controls
@@ -99,6 +109,12 @@ struct ImageSearchView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.orange)
+            }
+
+            if let initial, !didAutoSearch || query == initial.query {
+                Label(initial.because, systemImage: "wand.and.stars")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if service == .wallhaven {

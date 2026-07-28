@@ -44,9 +44,11 @@ if [[ -f "$ROOT/Resources/Variety.icns" ]]; then
 fi
 # The SVG ships too: the status item renders it at menu-bar size so the tray
 # icon is Variety's actual artwork rather than an approximation.
-if [[ -f "$ROOT/Resources/variety.svg" ]]; then
-    cp "$ROOT/Resources/variety.svg" "$APP/Contents/Resources/variety.svg"
-fi
+for svg in variety variety-indicator variety-indicator-dark; do
+    if [[ -f "$ROOT/Resources/$svg.svg" ]]; then
+        cp "$ROOT/Resources/$svg.svg" "$APP/Contents/Resources/$svg.svg"
+    fi
+done
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

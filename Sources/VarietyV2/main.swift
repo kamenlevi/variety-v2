@@ -139,6 +139,27 @@ case "--fadetest":
         }
     }
 
+case "--similar":
+    // Derives a "more like this" query from a downloaded image's sidecar.
+    runPumpingMainRunLoop { @MainActor in
+        let settings = Settings.load()
+        let library = ImageLibrary(settings: settings)
+        let files = library.downloaded()
+        var shown = 0
+        for file in files where shown < 6 {
+            guard let meta = library.metadata(for: file) else { continue }
+            guard let s = await SimilarImages.suggestion(for: meta) else {
+                print("  --    \(meta.sourceName): no tags or title to work from")
+                shown += 1
+                continue
+            }
+            print("  ok    \(meta.sourceName) -> \(s.kind.rawValue) \(s.query)")
+            print("        terms: \(s.terms.joined(separator: ", "))")
+            shown += 1
+        }
+        if shown == 0 { print("no downloaded images with metadata") }
+    }
+
 case "--selftest":
     exit(SelfTest.run() ? 0 : 1)
 

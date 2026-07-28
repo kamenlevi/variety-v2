@@ -415,6 +415,15 @@ private struct WallpaperTab: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Menu bar icon") {
+                Picker("Tint", selection: $settings.icon) {
+                    Text("Automatic").tag("Auto")
+                    Text("Light (for dark menu bars)").tag("Light")
+                    Text("Dark (for light menu bars)").tag("Dark")
+                }
+                .pickerStyle(.inline)
+            }
+
             Section("Transition") {
                 Picker("Fade between wallpapers", selection: $settings.wallpaperFade) {
                     ForEach(FadeSpeed.allCases, id: \.self) { Text($0.displayName).tag($0) }

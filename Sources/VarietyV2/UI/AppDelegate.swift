@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var selectorWindow: NSWindow?
     private var slideshow: SlideshowController?
     private var menuTargets: [ClosureMenuItem] = []
+    private var appearanceObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let settings = Settings.load()
@@ -31,7 +32,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = Self.statusIcon()
+        statusItem.button?.image = Self.statusIcon(preference: settings.icon)
+
+        // Re-tint when the system flips between light and dark.
+        appearanceObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.statusItem.button?.image = Self.statusIcon(preference: self.rotator.settings.icon)
+            }
+        }
 
         // Without a main menu there is no Edit menu, and therefore no working
         // Cut/Copy/Paste in any text field the app shows.
@@ -41,18 +52,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rotator.start()
     }
 
-    /// Variety's own icon, at menu bar size.
+    /// Variety's *indicator* icon, at menu bar size.
+    ///
+    /// Not the application icon: Variety uses a separate tray glyph
+    /// (`variety-indicator`), and ships two tints of it — the light one for
+    /// dark panels and `variety-indicator-dark` for light ones, chosen by the
+    /// `icon` option. That choice is made here from the menu bar's actual
+    /// appearance when the setting is left on Auto.
     ///
     /// Deliberately *not* a template image. A template uses only the alpha
-    /// channel, and this icon's alpha is the whole monitor silhouette, so it
-    /// would render as a featureless black slab. Drawn in colour it is the
-    /// actual Variety mark, which is what it should be — at the cost of not
-    /// inverting automatically in dark mode, which it does not need to since
-    /// the artwork carries its own dark outline.
-    private static func statusIcon() -> NSImage {
+    /// channel, and this artwork's alpha is the whole monitor silhouette, so
+    /// it would render as a featureless slab.
+    private static func statusIcon(preference: String) -> NSImage {
         let height: CGFloat = 18
+        let name: String
 
-        if let url = Bundle.main.url(forResource: "variety", withExtension: "svg"),
+        switch preference {
+        case "Light": name = "variety-indicator"
+        case "Dark":  name = "variety-indicator-dark"
+        default:
+            // Auto: the light glyph reads against a dark menu bar, and vice versa.
+            let dark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            name = dark ? "variety-indicator" : "variety-indicator-dark"
+        }
+
+        if let url = Bundle.main.url(forResource: name, withExtension: "svg"),
            let source = NSImage(contentsOf: url) {
             let aspect = source.size.height > 0 ? source.size.width / source.size.height : 1
             let size = NSSize(width: height * aspect, height: height)
@@ -221,6 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let current = self?.rotator.current else { return }
             NSWorkspace.shared.open(current)
         }
+        add(submenu, "More Like This…", key: "m") { [weak self] in self?.showMoreLikeThis() }
         add(submenu, "Copy to Folder…", key: "") { [weak self] in self?.copyCurrent() }
         add(submenu, "Copy Path", key: "") { [weak self] in
             guard let current = self?.rotator.current else { return }
@@ -256,6 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let view = PreferencesView(settings: rotator.settings, rotator: rotator) { [weak self] updated in
             guard let self else { return }
             self.rotator.applySettings(updated)
+            self.statusItem.button?.image = Self.statusIcon(preference: updated.icon)
             Task { await self.rotator.redrawCurrent() }
         }
 
@@ -297,13 +323,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selectorWindow = window
     }
 
+    /// Derives a query from the current wallpaper's own tags and searches it.
+    private func showMoreLikeThis() {
+        guard let origin = rotator.currentOrigin else { return }
+
+        Task { @MainActor in
+            guard let suggestion = await SimilarImages.suggestion(for: origin) else {
+                let alert = NSAlert()
+                alert.messageText = "Nothing to go on"
+                alert.informativeText = """
+                    This wallpaper carries no tags or description to build a                     search from. It works best on images from Wallhaven and                     Unsplash, which tag their photos.
+                    """
+                alert.runModal()
+                return
+            }
+
+            let service: ImageSearchView.Service =
+                suggestion.kind == .unsplash ? .unsplash : .wallhaven
+            let because = "Matching “\(suggestion.terms.joined(separator: ", "))” "
+                + "from the current wallpaper"
+
+            self.showSearch(initial: (service, suggestion.query, because))
+        }
+    }
+
     /// Search a service by subject and add it to the rotation.
-    private func showSearch() {
-        if let searchWindow {
+    private func showSearch(initial: (ImageSearchView.Service, String, String)? = nil) {
+        // A pre-filled search replaces any open one, or it would silently do
+        // nothing when the window is already up.
+        if let searchWindow, initial == nil {
             WindowPresenter.shared.present(searchWindow)
             return
         }
-        let view = ImageSearchView(settings: rotator.settings) { [weak self] source in
+        if initial != nil, let existing = searchWindow {
+            existing.close()
+            searchWindow = nil
+        }
+
+        let view = ImageSearchView(settings: rotator.settings, onAdd: { [weak self] source in
             guard let self else { return }
             var updated = self.rotator.settings
             if !updated.sources.contains(where: { $0.id == source.id }) {
@@ -313,7 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await self.rotator.refillIfNeeded(minimum: .max) }
             self.searchWindow?.close()
             self.searchWindow = nil
-        }
+        }, initial: initial.map { (service: $0.0, query: $0.1, because: $0.2) })
 
         let window = WindowPresenter.shared.makeWindow(
             title: "Find Images", size: NSSize(width: 820, height: 620))
