@@ -122,7 +122,7 @@ case "--render":
         let dest = outDir.appendingPathComponent("\(mode.rawValue).jpg")
         do {
             try ImagePipeline.render(.init(source: source, targetSize: size, mode: mode,
-                                           quote: nil, clockDate: nil, settings: Settings()),
+                                           quote: nil, clockDate: nil, settings: Settings(), effect: nil),
                                      to: dest)
             print("  ok    \(mode.rawValue) -> \(dest.path)")
         } catch {
@@ -130,11 +130,28 @@ case "--render":
         }
     }
 
+    for filter in Filter.defaults {
+        let slug = filter.name.lowercased().replacingOccurrences(of: " ", with: "-")
+        let dest = outDir.appendingPathComponent("effect-\(slug).jpg")
+        do {
+            try ImagePipeline.render(.init(source: source, targetSize: size, mode: .zoom,
+                                           quote: nil, clockDate: nil, settings: Settings(),
+                                           effect: filter),
+                                     to: dest)
+            print("  ok    effect \(filter.name)")
+        } catch {
+            print("  FAIL  effect \(filter.name): \(error)")
+        }
+    }
+
+    var quoteDemoSettings = Settings()
+    quoteDemoSettings.quotesEnabled = true
+    quoteDemoSettings.clockEnabled = true
     let overlaid = outDir.appendingPathComponent("overlays.jpg")
     do {
         try ImagePipeline.render(.init(
             source: source, targetSize: size, mode: .zoom,
-            quote: QuoteProvider.offline[0], clockDate: Date(), settings: Settings()),
+            quote: QuoteProvider.offline[0], clockDate: Date(), settings: quoteDemoSettings),
                                  to: overlaid)
         print("  ok    quote + clock -> \(overlaid.path)")
     } catch {
@@ -146,8 +163,8 @@ case "--probe-sources":
     // closing off, which is the main way this app rots.
     let settings = Settings.load()
     let sources: [any ImageSource] = args.count > 1
-        ? SourceRegistry.all(settings: settings).filter { $0.id.hasPrefix(args[1]) }
-        : SourceRegistry.all(settings: settings)
+        ? SourceRegistry.activeDownloaders(settings: settings).filter { $0.id.hasPrefix(args[1]) }
+        : SourceRegistry.activeDownloaders(settings: settings)
 
     let semaphore = DispatchSemaphore(value: 0)
     Task {

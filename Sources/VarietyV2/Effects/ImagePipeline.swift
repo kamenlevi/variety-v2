@@ -20,6 +20,10 @@ struct ImagePipeline {
         var quote: Quote?
         var clockDate: Date?
         var settings: Settings
+        /// One of the enabled entries from the Effects list, already chosen.
+        /// Picked by the caller rather than here so a redraw (a clock tick, say)
+        /// keeps the same effect instead of reshuffling every minute.
+        var effect: Filter?
     }
 
     enum PipelineError: Error, CustomStringConvertible {
@@ -51,15 +55,20 @@ struct ImagePipeline {
             ? input.extent.size
             : request.targetSize
 
-        var image = fit(input, to: canvas, mode: request.mode)
+        // Effect first, then framing: Variety applies its ImageMagick effect to
+        // the source image, so blurring or pixellating must not also smear the
+        // letterbox bars that framing would have added.
+        let effected = request.effect.map { EffectRenderer.apply($0, to: input) } ?? input
+
+        var image = fit(effected, to: canvas, mode: request.mode)
 
         // Overlays are positioned relative to the canvas, so they land
         // correctly in either case.
         if let quote = request.quote {
-            image = TextLayer.compose(quote: quote, over: image, size: canvas)
+            image = TextLayer.compose(quote: quote, over: image, size: canvas, settings: request.settings)
         }
         if let date = request.clockDate {
-            image = TextLayer.compose(clock: date, over: image, size: canvas)
+            image = TextLayer.compose(clock: date, over: image, size: canvas, settings: request.settings)
         }
 
         // Normalise the origin: a `.os` passthrough keeps the source extent,
@@ -104,21 +113,20 @@ struct ImagePipeline {
             let fitted = scaleToFit(image, size: size)
             return centre(fitted, over: background, size: size)
 
-        case .oilPainting:
-            let filled = scaleToFill(image, size: size)
-            // No true oil-paint filter ships with Core Image; the crystallise +
-            // sharpen pair is the closest stock approximation of Variety's.
-            let crystallise = CIFilter.crystallize()
-            crystallise.inputImage = filled
-            crystallise.radius = 12
-            crystallise.center = CGPoint(x: size.width / 2, y: size.height / 2)
+        case .smart:
+            // Variety's "smart" mode: zoom when the image's aspect is close to
+            // the screen's, otherwise fall back to a blurred fill so a very
+            // differently-shaped image is not cropped to pieces.
+            let extent = image.extent
+            guard extent.height > 0, size.height > 0 else { return image }
 
-            let sharpen = CIFilter.sharpenLuminance()
-            sharpen.inputImage = crystallise.outputImage?.cropped(to: CGRect(origin: .zero, size: size))
-            sharpen.sharpness = 0.6
+            let imageAspect = extent.width / extent.height
+            let screenAspect = size.width / size.height
+            let divergence = abs(imageAspect - screenAspect) / screenAspect
 
-            return sharpen.outputImage?.cropped(to: CGRect(origin: .zero, size: size))
-                ?? filled
+            return divergence <= 0.20
+                ? fit(image, to: size, mode: .zoom)
+                : fit(image, to: size, mode: .fillWithBlur)
         }
     }
 

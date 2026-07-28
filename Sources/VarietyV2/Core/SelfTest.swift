@@ -111,26 +111,37 @@ enum SelfTest {
         }
         check("a key present in a partial file is honoured", decoded.startAtLogin == true)
         check("keys absent from a partial file fall back to defaults",
-              decoded.changeIntervalSeconds == Settings().changeIntervalSeconds
-                  && decoded.enabledSourceIDs == Settings().enabledSourceIDs
-                  && decoded.displayMode == Settings().displayMode)
+              decoded.changeInterval == Settings().changeInterval
+                  && decoded.sources.count == Settings().sources.count
+                  && decoded.wallpaperDisplayMode == Settings().wallpaperDisplayMode)
 
         // An empty object is the degenerate case of the same problem.
         let empty = try? JSONDecoder().decode(Settings.self, from: Data("{}".utf8))
         check("an empty settings object decodes to defaults",
-              empty?.changeIntervalSeconds == Settings().changeIntervalSeconds)
+              empty?.changeInterval == Settings().changeInterval)
 
-        // And a full round trip must be lossless.
+        // And a full round trip must be lossless, across the nested types too.
         var full = Settings()
         full.clockEnabled = true
-        full.displayMode = .fillWithBlur
-        full.keepDownloaded = 321
+        full.wallpaperDisplayMode = DisplayMode.fillWithBlur.rawValue
+        full.quotaSize = 321
+        full.quotesHpos = 17
+        full.filters[3].enabled = true
+        full.sources.append(.init(enabled: true, kind: .reddit, location: "EarthPorn"))
+        full.favoritesOperations = [.init(origin: "Downloaded", operation: .move)]
+
         let roundTripped = (try? JSONEncoder().encode(full))
             .flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
         check("settings round-trip losslessly",
               roundTripped?.clockEnabled == true
-                  && roundTripped?.displayMode == .fillWithBlur
-                  && roundTripped?.keepDownloaded == 321)
+                  && roundTripped?.wallpaperDisplayMode == DisplayMode.fillWithBlur.rawValue
+                  && roundTripped?.quotaSize == 321
+                  && roundTripped?.quotesHpos == 17)
+        check("nested sources, filters and favorite operations round-trip",
+              roundTripped?.filters[3].enabled == true
+                  && roundTripped?.sources.last?.kind == .reddit
+                  && roundTripped?.sources.last?.location == "EarthPorn"
+                  && roundTripped?.favoritesOperations.first?.operation == .move)
     }
 
     // MARK: -

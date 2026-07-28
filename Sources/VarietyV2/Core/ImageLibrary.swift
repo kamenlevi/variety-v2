@@ -1,9 +1,13 @@
 import AppKit
 import Foundation
 
-/// Downloaded images on disk, plus the keep/discard workflow that is the point
-/// of Variety: favourites are moved somewhere permanent, trashed images are
-/// remembered so they never come back.
+/// Images on disk and the keep/discard workflow.
+///
+/// Variety keeps three folders — Downloaded, Fetched and Favorites — and
+/// favouriting *copies* or *moves* depending on where the image came from
+/// (`favorites_operations`). That distinction is preserved: a fetched image is
+/// moved because the Fetched folder is a scratch area, whereas a downloaded one
+/// is copied because it is still wanted in the rotation pool.
 final class ImageLibrary {
 
     private let settings: Settings
@@ -11,15 +15,13 @@ final class ImageLibrary {
 
     init(settings: Settings) {
         self.settings = settings
-        try? fm.createDirectory(at: settings.expandedDownloadFolder, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: settings.expandedFavoritesFolder, withIntermediateDirectories: true)
+        for folder in [settings.downloadFolderURL, settings.favoritesFolderURL, settings.fetchedFolderURL] {
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
         loadLedger()
     }
 
     // MARK: - Ledger
-    //
-    // Identity is the source-provided id, not the file path, so an image stays
-    // recognised after being favourited (and therefore moved) or deleted.
 
     private struct Ledger: Codable {
         var seen: Set<String> = []
@@ -27,10 +29,7 @@ final class ImageLibrary {
     }
 
     private var ledger = Ledger()
-
-    private var ledgerURL: URL {
-        settings.expandedDownloadFolder.appendingPathComponent(".ledger.json")
-    }
+    private var ledgerURL: URL { settings.downloadFolderURL.appendingPathComponent(".ledger.json") }
 
     private func loadLedger() {
         guard let data = try? Data(contentsOf: ledgerURL),
@@ -43,18 +42,20 @@ final class ImageLibrary {
         try? data.write(to: ledgerURL, options: .atomic)
     }
 
+    func hasSeen(_ id: String) -> Bool { ledger.seen.contains(id) || ledger.banished.contains(id) }
+
     // MARK: - Download
 
-    /// Downloads `image` unless it has been seen or trashed before.
-    /// Returns the local file, or nil if it was skipped.
-    func download(_ image: RemoteImage) async throws -> URL? {
-        guard !ledger.banished.contains(image.id), !ledger.seen.contains(image.id) else { return nil }
+    @discardableResult
+    func download(_ image: RemoteImage, screenSize: CGSize) async throws -> URL? {
+        guard !hasSeen(image.id) else { return nil }
+
+        let filter = ImageFilter(settings: settings)
+        // Cheap rejection before spending the bandwidth.
+        guard filter.passesNameCheck(image.imageURL.lastPathComponent) else { return nil }
 
         let data = try await Net.data(image.imageURL)
 
-        // Reject anything that isn't a decodable image of usable size: sources
-        // occasionally hand back HTML error pages or tiny placeholders with an
-        // image content-type.
         guard let rep = NSBitmapImageRep(data: data), rep.pixelsWide >= 800, rep.pixelsHigh >= 600 else {
             ledger.banished.insert(image.id)
             saveLedger()
@@ -62,20 +63,28 @@ final class ImageLibrary {
         }
 
         let ext = image.imageURL.pathExtension.isEmpty ? "jpg" : image.imageURL.pathExtension
-        let safeID = image.id.replacingOccurrences(of: "/", with: "_")
+        let safeID = image.id
+            .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: ":", with: "-")
-        let destination = settings.expandedDownloadFolder.appendingPathComponent("\(safeID).\(ext)")
+        let destination = settings.downloadFolderURL.appendingPathComponent("\(safeID).\(ext)")
 
         try data.write(to: destination, options: .atomic)
-        writeMetadata(for: image, at: destination)
 
+        // Full criteria need the decoded image, so they run after the write and
+        // discard on failure. Cheaper than decoding twice.
+        guard filter.passes(imageAt: destination, screenSize: screenSize) else {
+            try? fm.removeItem(at: destination)
+            ledger.banished.insert(image.id)
+            saveLedger()
+            return nil
+        }
+
+        writeMetadata(for: image, at: destination)
         ledger.seen.insert(image.id)
         saveLedger()
         return destination
     }
 
-    /// Sidecar JSON so attribution survives independently of the image file —
-    /// needed for "view source" and for the quote/author line.
     private func writeMetadata(for image: RemoteImage, at file: URL) {
         let sidecar = file.deletingPathExtension().appendingPathExtension("json")
         guard let data = try? JSONEncoder().encode(image) else { return }
@@ -90,14 +99,9 @@ final class ImageLibrary {
 
     // MARK: - Contents
 
-    /// Downloaded images, newest first.
-    func downloaded() -> [URL] {
-        contents(of: settings.expandedDownloadFolder)
-    }
-
-    func favorites() -> [URL] {
-        contents(of: settings.expandedFavoritesFolder)
-    }
+    func downloaded() -> [URL] { contents(of: settings.downloadFolderURL) }
+    func favorites() -> [URL] { contents(of: settings.favoritesFolderURL) }
+    func fetched() -> [URL] { contents(of: settings.fetchedFolderURL) }
 
     private func contents(of directory: URL) -> [URL] {
         let entries = (try? fm.contentsOfDirectory(
@@ -116,30 +120,58 @@ final class ImageLibrary {
 
     // MARK: - Keep / discard
 
-    /// Moves an image into the favourites folder, where pruning never touches it.
+    /// Which origin bucket a file belongs to, for `favorites_operations`.
+    private func origin(of file: URL) -> String {
+        let parent = file.deletingLastPathComponent().standardizedFileURL
+        if parent == settings.downloadFolderURL.standardizedFileURL { return "Downloaded" }
+        if parent == settings.fetchedFolderURL.standardizedFileURL { return "Fetched" }
+        return "Others"
+    }
+
     @discardableResult
     func favorite(_ file: URL) -> URL? {
-        let destination = settings.expandedFavoritesFolder.appendingPathComponent(file.lastPathComponent)
-        guard !fm.fileExists(atPath: destination.path) else { return destination }
+        guard !isFavorite(file) else { return file }
+
+        let bucket = origin(of: file)
+        let operation = settings.favoritesOperations
+            .first { $0.origin == bucket }?.operation ?? .copy
+
+        var destination = settings.favoritesFolderURL.appendingPathComponent(file.lastPathComponent)
+        // Don't clobber a different image that happens to share a name.
+        var attempt = 1
+        while fm.fileExists(atPath: destination.path) {
+            if (try? Data(contentsOf: destination)) == (try? Data(contentsOf: file)) { return destination }
+            let stem = file.deletingPathExtension().lastPathComponent
+            destination = settings.favoritesFolderURL
+                .appendingPathComponent("\(stem)-\(attempt).\(file.pathExtension)")
+            attempt += 1
+        }
+
         do {
-            try fm.moveItem(at: file, to: destination)
+            switch operation {
+            case .copy: try fm.copyItem(at: file, to: destination)
+            case .move: try fm.moveItem(at: file, to: destination)
+            }
             let sidecar = file.deletingPathExtension().appendingPathExtension("json")
             if fm.fileExists(atPath: sidecar.path) {
-                try? fm.moveItem(at: sidecar,
-                                 to: destination.deletingPathExtension().appendingPathExtension("json"))
+                let target = destination.deletingPathExtension().appendingPathExtension("json")
+                switch operation {
+                case .copy: try? fm.copyItem(at: sidecar, to: target)
+                case .move: try? fm.moveItem(at: sidecar, to: target)
+                }
             }
             return destination
         } catch {
+            NSLog("VarietyV2: could not favorite \(file.lastPathComponent): \(error)")
             return nil
         }
     }
 
     func isFavorite(_ file: URL) -> Bool {
         file.deletingLastPathComponent().standardizedFileURL
-            == settings.expandedFavoritesFolder.standardizedFileURL
+            == settings.favoritesFolderURL.standardizedFileURL
     }
 
-    /// Deletes an image and records its id so the source never offers it again.
     func trash(_ file: URL) {
         if let meta = metadata(for: file) {
             ledger.banished.insert(meta.id)
@@ -151,14 +183,31 @@ final class ImageLibrary {
         try? fm.trashItem(at: sidecar, resultingItemURL: nil)
     }
 
-    /// Keeps the download folder bounded. Favourites live elsewhere and are
-    /// never considered here.
-    func prune() {
-        let files = downloaded()
-        guard files.count > settings.keepDownloaded else { return }
-        for file in files.dropFirst(settings.keepDownloaded) {
-            try? fm.removeItem(at: file)
-            try? fm.removeItem(at: file.deletingPathExtension().appendingPathExtension("json"))
+    // MARK: - Quota
+
+    /// Variety bounds the Downloaded folder by total size in megabytes, not by
+    /// file count, and never touches Favorites. Oldest go first.
+    func enforceQuota() {
+        guard settings.quotaEnabled else { return }
+        let limit = Int64(settings.quotaSize) * 1024 * 1024
+
+        var files = downloaded().reversed().map { url -> (URL, Int64) in
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            return (url, Int64(size))
+        }
+        var total = files.reduce(Int64(0)) { $0 + $1.1 }
+
+        while total > limit, !files.isEmpty {
+            let (url, size) = files.removeFirst()
+            try? fm.removeItem(at: url)
+            try? fm.removeItem(at: url.deletingPathExtension().appendingPathExtension("json"))
+            total -= size
+        }
+    }
+
+    var downloadedBytes: Int64 {
+        downloaded().reduce(Int64(0)) { sum, url in
+            sum + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         }
     }
 }

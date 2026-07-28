@@ -1,24 +1,27 @@
 import AppKit
 import Foundation
 
-/// Drives everything: keeps a pool of candidate images topped up, picks the
-/// next wallpaper, renders it, sets it, and remembers where it has been so
-/// "previous" works.
+/// Drives everything: keeps the candidate pool topped up, picks the next
+/// wallpaper, renders it, sets it, and remembers where it has been.
 @MainActor
 final class Rotator {
 
     private(set) var settings: Settings
-    private let library: ImageLibrary
+    private var library: ImageLibrary
     private let generations: GenerationStore
 
-    /// Wallpapers shown this session, newest last.
     private(set) var history: [URL] = []
     private var historyIndex: Int = -1
     private(set) var current: URL?
     private(set) var currentOrigin: RemoteImage?
+    /// Effect applied to the current wallpaper. Held so a clock tick redraws
+    /// with the same effect rather than reshuffling every minute.
+    private var currentEffect: Filter?
 
     private var rotationTimer: Timer?
     private var clockTimer: Timer?
+    private var quoteTimer: Timer?
+    private var currentQuote: Quote?
     private var fetching = false
 
     var onChange: (() -> Void)?
@@ -36,6 +39,7 @@ final class Rotator {
     func start() {
         scheduleRotation()
         scheduleClock()
+        scheduleQuoteChange()
 
         if settings.changeOnWake {
             NSWorkspace.shared.notificationCenter.addObserver(
@@ -45,32 +49,28 @@ final class Rotator {
 
         Task {
             await refillIfNeeded()
-            if settings.changeOnLogin { await next() }
+            if settings.changeOnStart { await next() }
         }
     }
 
-    @objc private func didWake() {
-        Task { await next() }
-    }
+    @objc private func didWake() { Task { await next() } }
 
     func scheduleRotation() {
         rotationTimer?.invalidate()
-        guard !settings.paused, settings.changeIntervalSeconds > 0 else { return }
-        rotationTimer = Timer.scheduledTimer(withTimeInterval: settings.changeIntervalSeconds,
+        guard settings.changeEnabled, settings.changeInterval > 0 else { return }
+        rotationTimer = Timer.scheduledTimer(withTimeInterval: settings.changeInterval,
                                              repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.next() }
         }
     }
 
-    /// The clock overlay re-renders the *same* photo with a new time. Because
-    /// WallpaperAgent caches by URL, each tick still has to produce a new file,
-    /// which is why generation GC is tuned tightly.
+    /// The clock redraws the same photo with a new time. Because WallpaperAgent
+    /// caches by URL, each tick still produces a new file.
     private func scheduleClock() {
         clockTimer?.invalidate()
-        guard settings.clockEnabled, !settings.paused else { return }
+        guard settings.clockEnabled, settings.changeEnabled else { return }
 
-        // Fire on the minute boundary rather than 60s from now, so the
-        // displayed time is never a stale minute.
+        // Fire on the minute boundary so the displayed time is never stale.
         let now = Date()
         let nextMinute = Calendar.current.nextDate(
             after: now, matching: DateComponents(second: 0),
@@ -82,17 +82,40 @@ final class Rotator {
         RunLoop.main.add(clockTimer!, forMode: .common)
     }
 
-    func applySettings(_ new: Settings) {
-        settings = new
-        try? new.save()
-        scheduleRotation()
-        scheduleClock()
+    /// Variety can rotate the quote independently of the wallpaper.
+    private func scheduleQuoteChange() {
+        quoteTimer?.invalidate()
+        guard settings.quotesEnabled, settings.quotesChangeEnabled,
+              settings.quotesChangeInterval > 0 else { return }
+
+        quoteTimer = Timer.scheduledTimer(withTimeInterval: settings.quotesChangeInterval,
+                                          repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.currentQuote = await self.nextQuote()
+                await self.redrawCurrent()
+            }
+        }
     }
 
-    var isPaused: Bool { settings.paused }
+    func applySettings(_ new: Settings) {
+        let foldersChanged = new.downloadFolder != settings.downloadFolder
+            || new.favoritesFolder != settings.favoritesFolder
+            || new.fetchedFolder != settings.fetchedFolder
+
+        settings = new
+        try? new.save()
+        if foldersChanged { library = ImageLibrary(settings: new) }
+
+        scheduleRotation()
+        scheduleClock()
+        scheduleQuoteChange()
+    }
+
+    var isPaused: Bool { !settings.changeEnabled }
 
     func setPaused(_ paused: Bool) {
-        settings.paused = paused
+        settings.changeEnabled = !paused
         applySettings(settings)
     }
 
@@ -101,46 +124,68 @@ final class Rotator {
     func next() async {
         await refillIfNeeded()
 
-        // Walking forward through history first means "previous then next"
-        // retraces rather than jumping to something new.
         if historyIndex >= 0, historyIndex < history.count - 1 {
             historyIndex += 1
-            await show(history[historyIndex], recordHistory: false)
+            await show(history[historyIndex], recordHistory: false, newEffect: true)
             return
         }
 
-        let pool = library.downloaded() + library.favorites()
-        guard let pick = pool.randomElement() else { return }
-        await show(pick, recordHistory: true)
+        guard let pick = pickNext() else { return }
+        await show(pick, recordHistory: true, newEffect: true)
+    }
+
+    /// Variety biases towards freshly downloaded images over the local pool via
+    /// `download_preference_ratio`.
+    private func pickNext() -> URL? {
+        let downloaded = library.downloaded()
+        let local = SourceRegistry.activeLocalFiles(settings: settings)
+
+        if !downloaded.isEmpty, !local.isEmpty {
+            return Double.random(in: 0...1) < settings.downloadPreferenceRatio
+                ? downloaded.randomElement()
+                : local.randomElement()
+        }
+        return downloaded.randomElement() ?? local.randomElement()
     }
 
     func previous() async {
         guard historyIndex > 0 else { return }
         historyIndex -= 1
-        await show(history[historyIndex], recordHistory: false)
+        await show(history[historyIndex], recordHistory: false, newEffect: false)
     }
 
-    /// Re-renders the current photo — used by the clock tick, and after a
-    /// display-mode or overlay change.
     func redrawCurrent() async {
         guard let current else { return }
-        await show(current, recordHistory: false)
+        await show(current, recordHistory: false, newEffect: false)
+    }
+
+    func show(file: URL) async {
+        await show(file, recordHistory: true, newEffect: true)
     }
 
     // MARK: - Applying
 
-    private func show(_ file: URL, recordHistory: Bool) async {
+    private func show(_ file: URL, recordHistory: Bool, newEffect: Bool) async {
         let target = Self.targetSize()
-        let quote = settings.quotesEnabled ? await QuoteProvider.random() : nil
 
+        if newEffect {
+            currentEffect = EffectRenderer.randomEnabled(from: settings.filters)
+        }
+        if settings.quotesEnabled, currentQuote == nil {
+            currentQuote = await nextQuote()
+        }
+
+        let mode = DisplayMode(rawValue: settings.wallpaperDisplayMode) ?? .os
         let destination = generations.nextURL(ext: "jpg")
+
         let request = ImagePipeline.Request(
             source: file,
             targetSize: target,
-            mode: settings.displayMode,
-            quote: quote,
+            mode: mode,
+            quote: settings.quotesEnabled ? currentQuote : nil,
             clockDate: settings.clockEnabled ? Date() : nil,
-            settings: settings
+            settings: settings,
+            effect: currentEffect
         )
 
         do {
@@ -150,7 +195,6 @@ final class Rotator {
             current = file
             currentOrigin = library.metadata(for: file)
             if recordHistory {
-                // Drop any forward history, as a browser does on navigation.
                 if historyIndex < history.count - 1 {
                     history.removeSubrange((historyIndex + 1)...)
                 }
@@ -164,12 +208,13 @@ final class Rotator {
         }
     }
 
-    /// Wallpapers are rendered at the largest attached screen's backing
-    /// resolution so the image is sharp on Retina.
+    private func nextQuote() async -> Quote? {
+        await QuoteProvider.random(settings: settings)
+    }
+
     private static func targetSize() -> CGSize {
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return CGSize(width: 2560, height: 1600) }
-
         return screens.map { screen -> CGSize in
             let scale = screen.backingScaleFactor
             return CGSize(width: screen.frame.width * scale, height: screen.frame.height * scale)
@@ -180,10 +225,13 @@ final class Rotator {
 
     func favoritesForDisplay() -> [URL] { library.favorites() }
     func recentForDisplay() -> [URL] { library.downloaded() }
+    func fetchedForDisplay() -> [URL] { library.fetched() }
+    var historyForDisplay: [URL] { history.reversed() }
 
-    /// Jump straight to a specific image, from the thumbnail strip.
-    func show(file: URL) async {
-        await show(file, recordHistory: true)
+    /// Everything the Wallpaper Selector can offer.
+    func allSelectable() -> [URL] {
+        library.favorites() + library.downloaded() + library.fetched()
+            + SourceRegistry.activeLocalFiles(settings: settings)
     }
 
     // MARK: - Library actions
@@ -205,9 +253,7 @@ final class Rotator {
         await next()
     }
 
-    var currentIsFavorite: Bool {
-        current.map { library.isFavorite($0) } ?? false
-    }
+    var currentIsFavorite: Bool { current.map { library.isFavorite($0) } ?? false }
 
     func revealCurrent() {
         guard let current else { return }
@@ -219,22 +265,30 @@ final class Rotator {
         NSWorkspace.shared.open(url)
     }
 
+    /// Copies the current wallpaper somewhere the user chooses — Variety's
+    /// "Save to" / copyto behaviour.
+    func copyCurrent(to folder: URL) {
+        guard let current else { return }
+        let destination = folder.appendingPathComponent(current.lastPathComponent)
+        try? FileManager.default.copyItem(at: current, to: destination)
+    }
+
+    var downloadedBytes: Int64 { library.downloadedBytes }
+
     // MARK: - Fetching
 
-    /// Tops the pool up when it runs low. Sources are queried concurrently and
-    /// individual failures are logged rather than propagated — one dead API
-    /// must not stall rotation.
     func refillIfNeeded(minimum: Int = 30) async {
         guard !fetching else { return }
+        guard settings.internetEnabled else { return }
         guard library.downloaded().count < minimum else { return }
         fetching = true
         defer { fetching = false }
 
-        let enabled = SourceRegistry.all(settings: settings)
-            .filter { source in settings.enabledSourceIDs.contains { source.id.hasPrefix($0) } }
+        let downloaders = SourceRegistry.activeDownloaders(settings: settings)
+        guard !downloaders.isEmpty else { return }
 
         let candidates: [RemoteImage] = await withTaskGroup(of: [RemoteImage].self) { group in
-            for source in enabled {
+            for source in downloaders {
                 group.addTask {
                     do { return try await source.fetch() }
                     catch {
@@ -248,10 +302,11 @@ final class Rotator {
             return all
         }
 
+        let screen = Self.targetSize()
         for image in candidates.shuffled().prefix(40) {
-            do { _ = try await library.download(image) }
+            do { try await library.download(image, screenSize: screen) }
             catch { NSLog("VarietyV2: download failed for \(image.id): \(error)") }
         }
-        library.prune()
+        library.enforceQuota()
     }
 }
