@@ -318,26 +318,18 @@ enum SelfTest {
               DonateTab.bitcoinAddress == "bc1qgxlvmwe2pj5lvku6vm53edes3q7c3ykta7xyu4")
     }
 
-    /// A fade must not outrun the generation store.
+    /// Fade durations must be ordered and bounded.
     ///
-    /// Each frame is a file, and if a fade writes more files than the store
-    /// retains, it prunes the outgoing wallpaper mid-sequence and the *next*
-    /// fade has nothing to start from — it degrades to a hard cut with no
-    /// error anywhere.
+    /// The transition holds a window over the desktop for its duration, so an
+    /// over-long fade is not just ugly — it covers the wallpaper, and a bug
+    /// setting it to minutes would look like the desktop had frozen.
     private static func fadeFramesAreBounded() {
-        let rotatorRetain = 24    // must match Rotator's GenerationStore
-
-        for speed in FadeSpeed.allCases {
-            // frames + the destination itself
-            let perChange = speed.steps + 1
-            check("\(speed.rawValue) fade (\(perChange) files) fits within retention of \(rotatorRetain)",
-                  perChange < rotatorRetain)
-        }
-
-        check("system default writes no fade frames", FadeSpeed.system.steps == 0)
-        check("fade speeds increase in duration",
-              FadeSpeed.fast.steps < FadeSpeed.medium.steps
-                  && FadeSpeed.medium.steps < FadeSpeed.slow.steps)
+        check("system default does not animate", FadeSpeed.system.duration == 0)
+        check("fade durations increase",
+              FadeSpeed.fast.duration < FadeSpeed.medium.duration
+                  && FadeSpeed.medium.duration < FadeSpeed.slow.duration)
+        check("no fade outstays its welcome",
+              FadeSpeed.allCases.allSatisfy { $0.duration <= 3 })
     }
 
     // MARK: -

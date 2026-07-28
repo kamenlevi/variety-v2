@@ -19,6 +19,14 @@ struct RemoteImage: Hashable, Codable {
     var pixelWidth: Int?
     var pixelHeight: Int?
 
+    /// Which row of the Images table produced this, e.g. `wallhaven|nature`.
+    ///
+    /// Without it, disabling a source cannot remove its already-downloaded
+    /// images from rotation: the filename prefix only identifies the *service*,
+    /// so two Wallhaven searches are indistinguishable, and turning one off
+    /// would either keep showing it or wrongly drop the other.
+    var originSourceID: String?
+
     /// 0...1 shape agreement with the screen; 1 means it will crop perfectly.
     /// Unknown dimensions score neutral rather than last, so sources that do
     /// not report sizes are not silently starved.

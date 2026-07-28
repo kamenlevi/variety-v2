@@ -284,11 +284,12 @@ struct Settings: Codable {
 /// Crossfade between the outgoing and incoming wallpaper.
 ///
 /// macOS cross-fades once per change on its own and offers no control over it.
-/// Anything beyond `.system` is rendered here: blended frames are written to
-/// successive files and set in turn. Measured on this machine, WallpaperAgent
-/// accepts roughly ten sets per second, so a rendered fade is stepped rather
-/// than smooth — the system's own crossfade between each step softens it, but
-/// it will not look like a video dissolve.
+/// Anything beyond `.system` is animated by `FadeOverlay`, in a window sitting
+/// between the wallpaper and the desktop icons, at the display's refresh rate.
+///
+/// An earlier attempt set a series of pre-blended images as the wallpaper
+/// instead; WallpaperAgent accepts only about ten sets per second, so that was
+/// visibly stepped.
 enum FadeSpeed: String, Codable, CaseIterable {
     case system, fast, medium, slow
 
@@ -301,18 +302,16 @@ enum FadeSpeed: String, Codable, CaseIterable {
         }
     }
 
-    /// Intermediate frames to render. Zero means hand the image straight over.
-    var steps: Int {
+    /// How long the cross-dissolve runs. Zero hands the image straight over
+    /// and lets macOS do its own transition.
+    var duration: TimeInterval {
         switch self {
         case .system: return 0
-        case .fast: return 3
-        case .medium: return 6
-        case .slow: return 10
+        case .fast: return 0.35
+        case .medium: return 0.8
+        case .slow: return 1.6
         }
     }
-
-    /// Seconds between frames, kept at the measured ceiling of ~10 per second.
-    var frameInterval: TimeInterval { 0.1 }
 }
 
 enum LightnessMode: String, Codable, CaseIterable {

@@ -29,6 +29,7 @@ final class Rotator {
     private var lastSourceSignature: String?
     /// The rendered file currently on screen — the starting point for a fade.
     private var lastShownGeneration: URL?
+    private let fadeOverlay = FadeOverlay()
 
     var onChange: (() -> Void)?
 
@@ -49,7 +50,9 @@ final class Rotator {
         // History is empty on every launch.
         let state = RotationState.load()
         history = state.history.map { URL(fileURLWithPath: $0) }
-        historyIndex = min(state.index, history.count - 1)
+        // Resume at the end: a persisted mid-history position would make the
+        // first Next replay old wallpapers instead of showing something new.
+        historyIndex = history.count - 1
         current = state.current.map { URL(fileURLWithPath: $0) }
         currentOrigin = current.flatMap { library.metadata(for: $0) }
     }
@@ -143,6 +146,19 @@ final class Rotator {
             || new.favoritesFolder != settings.favoritesFolder
             || new.fetchedFolder != settings.fetchedFolder
         let sourcesChanged = new.sources != settings.sources
+        // Variety clears its prepared queue when filtering changes too — the
+        // buffer was built under the old criteria and would keep serving
+        // images that no longer qualify.
+        let filteringChanged =
+            new.useLandscapeEnabled != settings.useLandscapeEnabled
+            || new.minSizeEnabled != settings.minSizeEnabled
+            || new.minSize != settings.minSize
+            || new.lightnessEnabled != settings.lightnessEnabled
+            || new.lightnessMode != settings.lightnessMode
+            || new.desiredColorEnabled != settings.desiredColorEnabled
+            || new.desiredColor != settings.desiredColor
+            || new.nameRegexEnabled != settings.nameRegexEnabled
+            || new.nameRegex != settings.nameRegex
 
         settings = new
         try? new.save()
@@ -154,8 +170,10 @@ final class Rotator {
 
         // Turning on a source or adding a search should fetch from it now,
         // not whenever the pool next happens to run down.
-        if sourcesChanged || foldersChanged {
+        if sourcesChanged || foldersChanged || filteringChanged {
             invalidatePrepared()
+        }
+        if sourcesChanged || foldersChanged {
             Task { await refillIfNeeded(force: true) }
         }
     }
@@ -217,12 +235,38 @@ final class Rotator {
         prepared.append(contentsOf: fresh)
     }
 
-    /// Every image the enabled sources currently offer.
+    /// Every image the *currently enabled* sources offer.
+    ///
+    /// Filtering by enabled source is the whole point. Previously this was
+    /// every file in the download folder, so switching sources changed what
+    /// arrived in future but never what was shown — turn off nature and it
+    /// keeps appearing for as long as those files exist, which reads as the
+    /// setting being ignored.
     private func eligiblePool() -> [URL] {
-        var pool = library.downloaded()
-        pool += SourceRegistry.activeLocalFiles(settings: settings)
+        let enabled = Set(settings.sources.filter(\.enabled).map(\.id))
+
+        let downloaded = library.downloaded().filter { file in
+            guard let origin = library.metadata(for: file)?.originSourceID else {
+                // No provenance means this was downloaded before the source was
+                // recorded, and there is no honest way to tell which row it came
+                // from — the filename prefix names only the *service*, so an
+                // Unsplash search for "black and white" and one for
+                // "minimalistic" are indistinguishable by it.
+                //
+                // Guessing by prefix was worse than excluding: it kept showing
+                // images from searches the user had replaced, which reads as
+                // the setting being ignored. Legacy images are dropped from
+                // rotation instead; they stay on disk and can be cleared from
+                // the Library tab.
+                return false
+            }
+            return enabled.contains(origin)
+        }
+
+        var pool = downloaded + SourceRegistry.activeLocalFiles(settings: settings)
         var seen = Set<String>()
-        return pool.filter { seen.insert($0.standardizedFileURL.path).inserted }
+        pool = pool.filter { seen.insert($0.standardizedFileURL.path).inserted }
+        return pool
     }
 
     /// Takes the next image from the buffer.
@@ -235,7 +279,15 @@ final class Rotator {
         refillPreparedIfNeeded()
 
         if Double.random(in: 0...1) < settings.downloadPreferenceRatio {
-            let unseen = library.unseenFiles().filter { $0 != current }
+            // Restricted to the eligible pool. The unseen set is everything
+            // downloaded but not yet shown, regardless of which source it came
+            // from — injecting from it unfiltered bypassed the enabled-source
+            // check entirely, and with a 0.9 preference ratio that meant nine
+            // changes in ten ignored the user's source selection.
+            let eligible = Set(eligiblePool().map(\.path))
+            let unseen = library.unseenFiles()
+                .filter { $0 != current && eligible.contains($0.path) }
+
             if let jumper = unseen.randomElement() {
                 prepared.removeAll { $0 == jumper }
                 prepared.insert(jumper, at: 0)
@@ -257,7 +309,18 @@ final class Rotator {
 
     /// Called when the source list or folders change: the buffer describes the
     /// old configuration and would keep serving from it.
-    private func invalidatePrepared() { prepared.removeAll() }
+    ///
+    /// Forward history goes too. `next()` walks forward through history before
+    /// drawing anything new, so entries recorded under the old configuration
+    /// would be replayed — turning a source off and immediately pressing Next
+    /// would still show its images.
+    private func invalidatePrepared() {
+        prepared.removeAll()
+        if historyIndex < history.count - 1 {
+            history.removeSubrange((historyIndex + 1)...)
+        }
+        persistState()
+    }
 
     func previous() async {
         guard historyIndex > 0 else { return }
@@ -302,17 +365,13 @@ final class Rotator {
         do {
             try ImagePipeline.render(request, to: destination)
 
-            // Crossfade from what is on screen, when asked for.
-            let fadeFrames = Crossfade.renderFrames(
-                from: lastShownGeneration, to: destination, size: target,
-                speed: settings.wallpaperFade, store: generations)
-
-            for frame in fadeFrames {
-                try? WallpaperSetter.apply(url: frame)
-                try? await Task.sleep(for: .seconds(settings.wallpaperFade.frameInterval))
+            // The overlay animates the transition and sets the real wallpaper
+            // underneath while it covers the screen.
+            try fadeOverlay.crossfade(from: lastShownGeneration,
+                                      to: destination,
+                                      duration: settings.wallpaperFade.duration) {
+                try WallpaperSetter.apply(url: destination)
             }
-
-            try WallpaperSetter.apply(url: destination)
             lastShownGeneration = destination
 
             current = file
@@ -482,15 +541,26 @@ final class Rotator {
             lastSourceSignature = signature
         }
 
-        let downloaders = SourceRegistry.activeDownloaders(settings: settings)
-        guard !downloaders.isEmpty else { return }
+        // Fetched per table row rather than as one merged batch, so each
+        // candidate remembers which row produced it. Without that, turning a
+        // source off later cannot remove its images.
+        let rows = settings.sources.filter { $0.enabled && $0.kind.isDownloader }
+        guard !rows.isEmpty else { return }
 
+        let currentSettings = settings
         let candidates: [RemoteImage] = await withTaskGroup(of: [RemoteImage].self) { group in
-            for source in downloaders {
+            for row in rows {
+                guard let downloader = SourceRegistry.downloader(for: row, settings: currentSettings)
+                else { continue }
                 group.addTask {
-                    do { return try await source.fetch() }
-                    catch {
-                        NSLog("VarietyV2: source \(source.displayName) unavailable: \(error)")
+                    do {
+                        return try await downloader.fetch().map { image in
+                            var tagged = image
+                            tagged.originSourceID = row.id
+                            return tagged
+                        }
+                    } catch {
+                        NSLog("VarietyV2: source \(downloader.displayName) unavailable: \(error)")
                         return []
                     }
                 }
@@ -528,7 +598,13 @@ final class Rotator {
         // with images that would never be looked at and made every source
         // feel the same.
         queue = ranked
-        await downloadFromQueue(screenSize: screen)
+
+        // A pool that has just been emptied — every source swapped for a new
+        // one — needs more than the usual trickle before the rotation has
+        // anything of the user's choosing to show.
+        let poolSize = eligiblePool().count
+        let limit = poolSize < 12 ? 15 : 4
+        await downloadFromQueue(screenSize: screen, limit: limit)
     }
 
     /// Candidate metadata waiting to be downloaded. Cheap to hold — a few

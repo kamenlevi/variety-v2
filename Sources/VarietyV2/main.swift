@@ -118,46 +118,33 @@ case "--search":
     }
     searchSemaphore.wait()
 
-case "--fadetest":
-    // Renders a crossfade between two library images and reports the frames.
-    do {
-        let settings = Settings.load()
-        let files = SourceRegistry.imageFiles(in: settings.downloadFolderURL)
-        guard files.count >= 2 else {
-            print("need at least two downloaded images"); exit(1)
-        }
-        let store = GenerationStore(directory: generatedDir, retain: 40)
-        for speed in FadeSpeed.allCases {
-            let started = Date()
-            let frames = Crossfade.renderFrames(
-                from: files[0], to: files[1],
-                size: ScreenGeometry.largestPixelSize, speed: speed, store: store)
-            let ms = Date().timeIntervalSince(started) * 1000
-            let playback = Double(frames.count) * speed.frameInterval
-            print(String(format: "  %-8@ %2d frame(s), rendered in %5.0f ms, plays over %.1fs",
-                         speed.rawValue as NSString, frames.count, ms, playback))
-        }
-    }
 
-case "--similar":
-    // Derives a "more like this" query from a downloaded image's sidecar.
+case "--pool":
+    // What the rotation would actually draw from, and why.
     runPumpingMainRunLoop { @MainActor in
         let settings = Settings.load()
         let library = ImageLibrary(settings: settings)
-        let files = library.downloaded()
-        var shown = 0
-        for file in files where shown < 6 {
-            guard let meta = library.metadata(for: file) else { continue }
-            guard let s = await SimilarImages.suggestion(for: meta) else {
-                print("  --    \(meta.sourceName): no tags or title to work from")
-                shown += 1
-                continue
-            }
-            print("  ok    \(meta.sourceName) -> \(s.kind.rawValue) \(s.query)")
-            print("        terms: \(s.terms.joined(separator: ", "))")
-            shown += 1
+        let enabled = Set(settings.sources.filter(\.enabled).map(\.id))
+
+        print("enabled sources:")
+        for s in settings.sources where s.enabled {
+            print("  \(s.kind.rawValue) \(s.location.isEmpty ? "(default)" : s.location)")
         }
-        if shown == 0 { print("no downloaded images with metadata") }
+
+        var kept = 0, dropped = 0
+        var byOrigin: [String: Int] = [:]
+        for file in library.downloaded() {
+            let origin = library.metadata(for: file)?.originSourceID
+            let key = origin ?? "(no provenance: \(file.lastPathComponent.split(separator: "-").first.map(String.init) ?? "?"))"
+            if let origin, enabled.contains(origin) { kept += 1 } else { dropped += 1 }
+            byOrigin[key, default: 0] += 1
+        }
+        print("\ndownloaded images by origin:")
+        for (k, v) in byOrigin.sorted(by: { $0.value > $1.value }) {
+            let mark = enabled.contains(k) ? "in pool " : "excluded"
+            print("  \(mark)  \(v)  \(k)")
+        }
+        print("\nwith provenance: \(kept) in pool, \(dropped) excluded or unknown")
     }
 
 case "--selftest":

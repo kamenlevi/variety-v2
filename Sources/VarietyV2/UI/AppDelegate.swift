@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var slideshow: SlideshowController?
     private var menuTargets: [ClosureMenuItem] = []
     private var appearanceObserver: NSObjectProtocol?
+    private var scrollHandler: StatusItemScrollHandler?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let settings = Settings.load()
@@ -33,6 +34,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = Self.statusIcon(preference: settings.icon)
+
+        // Scroll over the icon to move through wallpapers, as Variety's
+        // indicator does.
+        if let button = statusItem.button {
+            scrollHandler = StatusItemScrollHandler.install(
+                on: button,
+                next: { [weak self] in Task { @MainActor in await self?.rotator.next() } },
+                previous: { [weak self] in Task { @MainActor in await self?.rotator.previous() } })
+        }
 
         // Re-tint when the system flips between light and dark.
         appearanceObserver = DistributedNotificationCenter.default().addObserver(
