@@ -42,7 +42,7 @@ struct PreferencesView: View {
 
             Group {
                 switch tab {
-                case .general:     GeneralTab(settings: $settings)
+                case .general:     GeneralTab(settings: $settings, rotator: rotator)
                 case .wallpaper:   WallpaperTab(settings: $settings)
                 case .quotes:      QuotesTab(settings: $settings)
                 case .clock:       ClockTab(settings: $settings)
@@ -120,10 +120,19 @@ private struct TabStrip: View {
 
 private struct GeneralTab: View {
     @Binding var settings: Settings
+    let rotator: Rotator
     @State private var selection: Source.ID?
     @State private var showingAdd = false
 
     var body: some View {
+        // Scrollable: this tab is taller than the window, and content clipped
+        // off the bottom is content the user will never find.
+        ScrollView {
+            content
+        }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("General").font(.headline)
@@ -141,14 +150,9 @@ private struct GeneralTab: View {
                 }))
             .disabled(!LoginItem.isAvailable)
 
-            HStack {
-                Toggle("Change wallpaper every", isOn: $settings.changeEnabled)
-                IntervalField(seconds: $settings.changeInterval)
-                    .disabled(!settings.changeEnabled)
-            }
+            Divider()
 
-            Toggle("Change wallpaper on start", isOn: $settings.changeOnStart)
-            Toggle("Change wallpaper on wake from sleep", isOn: $settings.changeOnWake)
+            RotationSection(settings: $settings, rotator: rotator)
 
             Divider()
 
@@ -197,7 +201,7 @@ private struct SourceTable: View {
             } rows: {
                 ForEach(settings.sources) { TableRow($0) }
             }
-            .frame(minHeight: 220)
+            .frame(height: 190)
 
             VStack(spacing: 6) {
                 Button("Search…") { showingSearch = true }
@@ -389,6 +393,10 @@ private struct WallpaperTab: View {
     }
 
     var body: some View {
+        ScrollView { form }
+    }
+
+    private var form: some View {
         Form {
             Section("Alignment and scaling") {
                 Toggle("Auto-rotate the image according to EXIF data",
@@ -484,6 +492,10 @@ private struct ClockTab: View {
     @Binding var settings: Settings
 
     var body: some View {
+        ScrollView { form }
+    }
+
+    private var form: some View {
         Form {
             Toggle("Show a clock on the desktop", isOn: $settings.clockEnabled)
 
@@ -522,6 +534,10 @@ private struct SlideshowTab: View {
     @Binding var settings: Settings
 
     var body: some View {
+        ScrollView { form }
+    }
+
+    private var form: some View {
         Form {
             Section("Use images from") {
                 Toggle("All enabled sources", isOn: $settings.slideshowSourcesEnabled)
@@ -578,6 +594,10 @@ private struct DownloadingTab: View {
     @Binding var settings: Settings
 
     var body: some View {
+        ScrollView { form }
+    }
+
+    private var form: some View {
         Form {
             Section("Folders") {
                 LabeledContent("Download to") { FolderField(path: $settings.downloadFolder) }
@@ -644,6 +664,10 @@ private struct FilteringTab: View {
     @Binding var settings: Settings
 
     var body: some View {
+        ScrollView { form }
+    }
+
+    private var form: some View {
         Form {
             Section("Your display") {
                 LabeledContent("Detected") { Text(ScreenGeometry.description) }

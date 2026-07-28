@@ -59,12 +59,24 @@ final class Rotator {
 
     @objc private func didWake() { Task { await next() } }
 
+    /// When the next automatic change is due, or nil when rotation is off.
+    /// Surfaced so Preferences can show a countdown — the quickest way to tell
+    /// whether the interval setting actually took effect.
+    private(set) var nextChangeDate: Date?
+
     func scheduleRotation() {
         rotationTimer?.invalidate()
+        nextChangeDate = nil
         guard settings.changeEnabled, settings.changeInterval > 0 else { return }
+
+        nextChangeDate = Date().addingTimeInterval(settings.changeInterval)
         rotationTimer = Timer.scheduledTimer(withTimeInterval: settings.changeInterval,
                                              repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.next() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.nextChangeDate = Date().addingTimeInterval(self.settings.changeInterval)
+                await self.next()
+            }
         }
     }
 
