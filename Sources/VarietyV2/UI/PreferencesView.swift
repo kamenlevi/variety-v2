@@ -430,7 +430,7 @@ private struct WallpaperTab: View {
                 }
                 .pickerStyle(.inline)
 
-                Text("macOS cross-fades once per change and offers no control over it, so anything beyond the system default is rendered here: blended frames are written and shown in turn. WallpaperAgent accepts about ten frames a second, so a longer fade is stepped rather than perfectly smooth.")
+                Text("macOS cross-fades once per change and offers no control over it. Anything beyond the system default is animated by Variety itself, in a layer between the wallpaper and your desktop icons, at your display's refresh rate.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

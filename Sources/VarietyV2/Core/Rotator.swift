@@ -78,17 +78,40 @@ final class Rotator {
         scheduleRotation()
         scheduleClock()
         scheduleQuoteChange()
-
-        if settings.changeOnWake {
-            NSWorkspace.shared.notificationCenter.addObserver(
-                self, selector: #selector(didWake),
-                name: NSWorkspace.didWakeNotification, object: nil)
-        }
+        scheduleWakeObserver()
 
         Task {
             await refillIfNeeded()
             if settings.changeOnStart { await next() }
         }
+    }
+
+    /// Whether the wake observer is currently registered. Tracked rather than
+    /// re-derived, because `addObserver` is not idempotent — registering twice
+    /// changes the wallpaper twice per wake.
+    private var observingWake = false
+
+    /// Registers or removes the wake observer to match the setting.
+    ///
+    /// This used to happen once, in `start()`, so the preference only took
+    /// effect at launch: switching it off left the observer firing, and
+    /// switching it on did nothing until the app was restarted.
+    private func scheduleWakeObserver() {
+        guard settings.changeOnWake != observingWake else { return }
+
+        if settings.changeOnWake {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self, selector: #selector(didWake),
+                name: NSWorkspace.didWakeNotification, object: nil)
+        } else {
+            NSWorkspace.shared.notificationCenter.removeObserver(
+                self, name: NSWorkspace.didWakeNotification, object: nil)
+        }
+        observingWake = settings.changeOnWake
+    }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     @objc private func didWake() { Task { await next() } }
@@ -170,10 +193,14 @@ final class Rotator {
         settings = new
         try? new.save()
         if foldersChanged { library = ImageLibrary(settings: new) }
+        // Enabling or disabling a source changes the pool without touching a
+        // single file, so this cannot wait for a filesystem event.
+        invalidatePool()
 
         scheduleRotation()
         scheduleClock()
         scheduleQuoteChange()
+        scheduleWakeObserver()
 
         // Turning on a source or adding a search should fetch from it now,
         // not whenever the pool next happens to run down.
@@ -253,7 +280,29 @@ final class Rotator {
     /// arrived in future but never what was shown — turn off nature and it
     /// keeps appearing for as long as those files exist, which reads as the
     /// setting being ignored.
+    /// Cached result of `computeEligiblePool`, cleared by `invalidatePool()`.
+    ///
+    /// Worth caching because building it is proportional to the whole library
+    /// in *disk reads* — a directory enumeration plus one sidecar decode per
+    /// image — and a single wallpaper change consulted it three or four times
+    /// (twice inside `pickNext`, again on the fallback path, and again from
+    /// `refillIfNeeded`). At the default 1000 MB quota that was on the order of
+    /// two thousand file reads per change, all on the main actor.
+    private var cachedPool: [URL]?
+
     private func eligiblePool() -> [URL] {
+        if let cachedPool { return cachedPool }
+        let pool = computeEligiblePool()
+        cachedPool = pool
+        return pool
+    }
+
+    /// Drops the cached pool. Called wherever the set of files or the set of
+    /// enabled sources can have changed — downloads, deletions, favouriting,
+    /// and settings edits.
+    private func invalidatePool() { cachedPool = nil }
+
+    private func computeEligiblePool() -> [URL] {
         let enabled = Set(settings.sources.filter(\.enabled).map(\.id))
 
         let downloaded = library.downloaded().filter { file in
@@ -327,6 +376,7 @@ final class Rotator {
     /// would still show its images.
     private func invalidatePrepared() {
         prepared.removeAll()
+        invalidatePool()
         if historyIndex < history.count - 1 {
             history.removeSubrange((historyIndex + 1)...)
         }
@@ -378,13 +428,23 @@ final class Rotator {
         )
 
         do {
-            try ImagePipeline.render(request, to: destination)
+            // Rendering is the expensive part of a change: a full-screen Core
+            // Image pass plus a JPEG encode, measured at ~70 ms for a 2560×1600
+            // canvas and several times that on a 6K display, more again with
+            // one of the painterly effects enabled. Running it inline on the
+            // main actor froze the menu bar for that whole window on every
+            // single change, so it goes to the background and the UI work
+            // resumes here once it lands.
+            try await Task.detached(priority: .userInitiated) {
+                try ImagePipeline.render(request, to: destination)
+            }.value
 
             // The overlay animates the transition and sets the real wallpaper
-            // underneath while it covers the screen.
-            try fadeOverlay.crossfade(from: lastShownGeneration,
-                                      to: destination,
-                                      duration: settings.wallpaperFade.duration) {
+            // underneath while it covers the screen. Awaited: the cover has to
+            // finish blending in before the wallpaper may be touched.
+            try await fadeOverlay.crossfade(from: lastShownGeneration,
+                                            to: destination,
+                                            duration: settings.wallpaperFade.duration) {
                 try WallpaperSetter.apply(url: destination)
             }
             lastShownGeneration = destination
@@ -447,6 +507,7 @@ final class Rotator {
         if let moved = library.favorite(current) {
             self.current = moved
             if historyIndex >= 0, historyIndex < history.count { history[historyIndex] = moved }
+            invalidatePool()
             onChange?()
         }
     }
@@ -454,6 +515,7 @@ final class Rotator {
     func trashCurrent() async {
         guard let current else { return }
         library.trash(current)
+        invalidatePool()
         history.removeAll { $0 == current }
         historyIndex = min(historyIndex, history.count - 1)
         await next()
@@ -492,6 +554,7 @@ final class Rotator {
     @discardableResult
     func clearDownloads(source: String? = nil) async -> Int {
         let removed = library.clearDownloads(source: source)
+        invalidatePool()
         history.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         historyIndex = min(historyIndex, history.count - 1)
 
@@ -506,6 +569,7 @@ final class Rotator {
     @discardableResult
     func remove(_ files: [URL]) async -> Int {
         let removed = library.remove(files)
+        invalidatePool()
         history.removeAll { files.contains($0) }
         historyIndex = min(historyIndex, history.count - 1)
 
@@ -631,25 +695,39 @@ final class Rotator {
     private func downloadFromQueue(screenSize: CGSize, limit: Int = 4) async {
         var downloaded = 0
 
+        // The cap is per row of the Images table, so counting it once per row
+        // rather than once per candidate keeps this off the disk in a loop.
+        var unseenByRow: [String: Int] = [:]
+
         while downloaded < limit, !queue.isEmpty {
             let image = queue.removeFirst()
 
-            // The source id is the part of the image id before the colon.
-            let sourceID = image.id.split(separator: ":").first.map(String.init) ?? image.sourceName
-            guard library.unseenCount(forSource: sourceID) < ImageLibrary.maxUnseenPerSource else {
+            // Tagged in `refillIfNeeded`; every candidate reaching here has one.
+            guard let sourceID = image.originSourceID else { continue }
+            let alreadyWaiting = unseenByRow[sourceID]
+                ?? library.unseenCount(forSource: sourceID)
+            guard alreadyWaiting < ImageLibrary.maxUnseenPerSource else {
+                unseenByRow[sourceID] = alreadyWaiting
                 continue
             }
 
             do {
                 if try await library.download(image, screenSize: screenSize) != nil {
                     downloaded += 1
+                    unseenByRow[sourceID] = alreadyWaiting + 1
+                    // A new file is a new pool member; without this the image
+                    // just fetched could not be shown until something else
+                    // happened to invalidate.
+                    invalidatePool()
                 }
             } catch {
                 NSLog("VarietyV2: download failed for \(image.id): \(error)")
             }
         }
 
+        // The sweep can trash pool members, so the cache cannot outlive it.
         library.enforceQuota()
+        invalidatePool()
     }
 
     /// Tops up in the background after a wallpaper change, as Variety does two

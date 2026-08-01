@@ -108,9 +108,23 @@ struct LibraryTab: View {
         breakdown = rotator.downloadCountsBySource()
     }
 
-    /// Filenames start with the source id, which is not always presentable.
+    /// Buckets are keyed by source row — `kind|location`, e.g.
+    /// `unsplash|black and white` — so both halves need naming: the service in
+    /// full, and the search term that distinguishes one row from another of the
+    /// same service.
     private func displayName(_ source: String) -> String {
-        switch source {
+        if source == ImageLibrary.legacyBucket {
+            return "Unknown source (not in rotation)"
+        }
+
+        let parts = source.split(separator: "|", maxSplits: 1).map(String.init)
+        let service = serviceName(parts.first ?? source)
+        guard let location = parts.dropFirst().first, !location.isEmpty else { return service }
+        return "\(service) — \(location)"
+    }
+
+    private func serviceName(_ kind: String) -> String {
+        switch kind {
         case "artstation": return "ArtStation"
         case "wallhaven": return "Wallhaven"
         case "bing": return "Bing Photo of the Day"
@@ -119,7 +133,7 @@ struct LibraryTab: View {
         case "unsplash": return "Unsplash"
         case "reddit": return "Reddit"
         case "mediarss", "feed": return "RSS feed"
-        default: return source.capitalized
+        default: return kind.capitalized
         }
     }
 

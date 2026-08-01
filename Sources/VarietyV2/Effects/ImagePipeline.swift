@@ -13,7 +13,10 @@ import Foundation
 /// `WallpaperSetter` for why reusing a path silently fails.
 struct ImagePipeline {
 
-    struct Request {
+    /// `Sendable` so a render can be handed to a background task: every field is
+    /// a value type, and the request is fully resolved by the caller on the
+    /// main actor before it crosses over.
+    struct Request: Sendable {
         var source: URL
         var targetSize: CGSize
         var mode: DisplayMode

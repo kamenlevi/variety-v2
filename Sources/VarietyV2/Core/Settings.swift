@@ -160,12 +160,29 @@ struct Settings: Codable {
     static let fileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Application Support/VarietyV2/settings.json")
 
+    /// Where an unreadable settings file is preserved before defaults take over.
+    static var salvageURL: URL { fileURL.appendingPathExtension("bad") }
+
     static func load() -> Settings {
         guard let data = try? Data(contentsOf: fileURL) else { return Settings() }
         do {
             return try JSONDecoder().decode(Settings.self, from: data)
         } catch {
-            NSLog("VarietyV2: settings could not be read (\(error)); using defaults")
+            // A *partial* file decodes fine — `init(from:)` fills in defaults
+            // field by field. Reaching here means the file is malformed
+            // outright, typically a truncated write.
+            //
+            // Returning defaults is the only way to keep running, but the next
+            // `save()` overwrites the original, so it is copied aside first.
+            // Without that, a single bad write silently and permanently
+            // discarded every preference — the failure this decoder exists to
+            // prevent, arriving by a different route.
+            try? data.write(to: salvageURL, options: .atomic)
+            NSLog("""
+                VarietyV2: settings file is unreadable (\(error)). \
+                Falling back to defaults; the original has been kept at \
+                \(salvageURL.path)
+                """)
             return Settings()
         }
     }

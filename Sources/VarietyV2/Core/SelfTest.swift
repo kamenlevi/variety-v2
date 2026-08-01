@@ -32,6 +32,9 @@ enum SelfTest {
         preparedBufferCoversEverythingBeforeRepeating()
         donationDetailsAreUpstream()
         fadeFramesAreBounded()
+        sweepsSpareFilesTheAppDidNotCreate()
+        sweepsRefuseProtectedFolders()
+        sourceBucketsMatchTheRotationFilter()
 
         print(failures.isEmpty ? "\nall checks passed" : "\n\(failures.count) check(s) failed")
         return failures.isEmpty
@@ -333,6 +336,115 @@ enum SelfTest {
     }
 
     // MARK: -
+
+    // MARK: - Deletion safety
+
+    /// The download folder is user-settable, so the sweeps must never assume
+    /// they own everything in it.
+    ///
+    /// Before this, `enforceQuota` deleted the oldest files in that folder
+    /// outright — with `removeItem`, not the Trash — until it was under quota.
+    /// Pointing the setting at an existing picture folder therefore destroyed
+    /// images the app had never downloaded, unrecoverably.
+    private static func sweepsSpareFilesTheAppDidNotCreate() {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var settings = Settings()
+        settings.downloadFolder = dir.path
+        settings.quotaEnabled = true
+        settings.quotaSize = 0          // force the sweep to want everything gone
+        let library = ImageLibrary(settings: settings)
+
+        // One file the app "downloaded" (it has a sidecar), one the user put
+        // there by hand (it does not).
+        let owned = dir.appendingPathComponent("unsplash-abc.jpg")
+        let foreign = dir.appendingPathComponent("holiday-photo.jpg")
+        let payload = Data(repeating: 0xFF, count: 4096)
+        try? payload.write(to: owned)
+        try? payload.write(to: foreign)
+        try? Data("{}".utf8).write(to: dir.appendingPathComponent("unsplash-abc.json"))
+
+        check("a file with no sidecar is not counted as ours",
+              library.ownedDownloads().map(\.lastPathComponent) == ["unsplash-abc.jpg"])
+
+        library.enforceQuota()
+        let fm = FileManager.default
+        check("the quota sweep leaves files the app did not download",
+              fm.fileExists(atPath: foreign.path))
+        check("the quota sweep still reclaims files the app did download",
+              !fm.fileExists(atPath: owned.path))
+
+        // Same guarantee for the explicit "Remove All Downloads" action.
+        try? payload.write(to: owned)
+        try? Data("{}".utf8).write(to: dir.appendingPathComponent("unsplash-abc.json"))
+        let removed = library.clearDownloads()
+        check("clearing downloads reports only what it removed", removed == 1)
+        check("clearing downloads leaves foreign files alone",
+              fm.fileExists(atPath: foreign.path))
+    }
+
+    /// Choosing `~/Pictures` itself as the download folder is a
+    /// misconfiguration, not an instruction to empty it.
+    private static func sweepsRefuseProtectedFolders() {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+
+        for folder in ["Pictures", "Documents", "Desktop", "Downloads"] {
+            var settings = Settings()
+            settings.downloadFolder = home.appendingPathComponent(folder).path
+            let library = ImageLibrary(settings: settings)
+            check("~/\(folder) is refused as a sweep target",
+                  library.downloadFolderIsProtected && library.clearDownloads() == 0)
+        }
+
+        // A subfolder is the normal, intended configuration.
+        var nested = Settings()
+        nested.downloadFolder = home.appendingPathComponent("Pictures/Variety").path
+        check("a subfolder of ~/Pictures is still sweepable",
+              !ImageLibrary(settings: nested).downloadFolderIsProtected)
+    }
+
+    /// The Library tab's buckets and the rotation's filter have to agree on
+    /// what "a source" is, or Remove clears something other than what it names.
+    ///
+    /// Both now key on `originSourceID` (the row of the Images table). The
+    /// filename prefix, used previously for the tally, identifies only the
+    /// *service*, so two Unsplash searches shared one bucket.
+    private static func sourceBucketsMatchTheRotationFilter() {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var settings = Settings()
+        settings.downloadFolder = dir.path
+        settings.quotaEnabled = false
+        let library = ImageLibrary(settings: settings)
+
+        // Two rows of the same service, as in "unsplash|forest" vs
+        // "unsplash|minimal".
+        for (name, row) in [("unsplash-a", "unsplash|forest"),
+                            ("unsplash-b", "unsplash|minimal"),
+                            ("unsplash-c", "unsplash|minimal")] {
+            try? Data(repeating: 0xFF, count: 512)
+                .write(to: dir.appendingPathComponent("\(name).jpg"))
+            let meta = RemoteImage(
+                id: "unsplash:\(name)", imageURL: URL(string: "https://example.invalid/\(name)")!,
+                originURL: nil, title: nil, author: nil, sourceName: "Unsplash",
+                pixelWidth: nil, pixelHeight: nil, originSourceID: row)
+            try? JSONEncoder().encode(meta)
+                .write(to: dir.appendingPathComponent("\(name).json"))
+        }
+
+        let buckets = library.downloadCountsBySource()
+        check("two searches of one service are separate buckets", buckets.count == 2)
+        check("each bucket counts only its own row",
+              buckets.first { $0.source == "unsplash|minimal" }?.count == 2
+                  && buckets.first { $0.source == "unsplash|forest" }?.count == 1)
+
+        let removed = library.clearDownloads(source: "unsplash|forest")
+        check("removing one search removes only that search", removed == 1)
+        check("the other search survives",
+              library.ownedDownloads().count == 2)
+    }
 
     private static func tempDir() -> URL {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())

@@ -83,7 +83,10 @@ enum Net {
     /// something browser-shaped, Reddit wants the platform:app:version form.
     static let browserUA =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-    static let redditUA = "macos:com.kamenlevi.varietyv2:0.1.0 (by /u/kamenlevi)"
+    /// Reddit asks that the User-Agent identify the *application*. It must not
+    /// name an individual account: every install would then claim to be that
+    /// person, so one user's rate limiting or ban would apply to everybody.
+    static let redditUA = "macos:org.varietywalls.variety:0.1.0"
 
     static func data(_ url: URL, ua: String = browserUA, headers: [String: String] = [:]) async throws -> Data {
         var request = URLRequest(url: url, timeoutInterval: 20)

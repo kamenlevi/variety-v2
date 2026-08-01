@@ -64,12 +64,15 @@ final class ImageLibrary {
             .filter { fm.fileExists(atPath: $0.path) }
     }
 
-    /// How many unseen images a given source is sitting on. A source at the cap
+    /// How many unseen images a given source row is sitting on. A row at the cap
     /// is skipped, which is what stops one prolific source dominating.
+    ///
+    /// Counted per *row* (`originSourceID`), matching Variety, where the cap is
+    /// per downloader instance. Counting by filename prefix meant every
+    /// Wallhaven search shared a single allowance of ten, so enabling a second
+    /// one starved the first rather than adding to it.
     func unseenCount(forSource sourceID: String) -> Int {
-        let prefix = sourceID.replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "-")
-        return unseenFiles().filter { $0.lastPathComponent.hasPrefix(prefix) }.count
+        unseenFiles().filter { metadata(for: $0)?.originSourceID == sourceID }.count
     }
 
     /// Called when an image is actually displayed.
@@ -224,15 +227,59 @@ final class ImageLibrary {
         try? fm.trashItem(at: sidecar, resultingItemURL: nil)
     }
 
+    // MARK: - Ownership
+
+    /// Whether this app is the one that put `file` in the download folder.
+    ///
+    /// Every download writes a JSON sidecar next to the image (`writeMetadata`),
+    /// and nothing else does, so sidecar presence is a reliable marker of
+    /// "we created this".
+    ///
+    /// This gate exists because the download folder is user-settable from
+    /// Preferences. Without it, pointing it at an existing picture folder means
+    /// the quota sweep starts deleting images the user has never heard of —
+    /// which it did, unrecoverably, because it used `removeItem` rather than
+    /// the Trash.
+    private func isOwned(_ file: URL) -> Bool {
+        fm.fileExists(atPath: file.deletingPathExtension().appendingPathExtension("json").path)
+    }
+
+    /// Downloaded images this app actually created, newest first.
+    func ownedDownloads() -> [URL] { downloaded().filter(isOwned) }
+
+    /// Folders whose contents must never be swept, whatever the setting says.
+    ///
+    /// Choosing one of these as the download folder is a misconfiguration
+    /// rather than an instruction to delete its contents.
+    private static let protectedRoots: [URL] = {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        return [home]
+            + ["Pictures", "Documents", "Desktop", "Downloads", "Movies", "Music"]
+                .map { home.appendingPathComponent($0) }
+    }()
+
+    /// True when the download folder is somewhere it would be reckless to
+    /// delete from — the home directory itself, or one of the standard user
+    /// folders. Subfolders of these are fine; it is the folders themselves that
+    /// are off limits.
+    var downloadFolderIsProtected: Bool {
+        let folder = settings.downloadFolderURL.standardizedFileURL
+        return Self.protectedRoots.contains { $0.standardizedFileURL == folder }
+    }
+
     // MARK: - Quota
 
     /// Variety bounds the Downloaded folder by total size in megabytes, not by
     /// file count, and never touches Favorites. Oldest go first.
+    ///
+    /// Only images this app downloaded are considered, and they go to the Trash
+    /// rather than being unlinked, so a misconfigured download folder costs the
+    /// user nothing they cannot get back.
     func enforceQuota() {
-        guard settings.quotaEnabled else { return }
+        guard settings.quotaEnabled, !downloadFolderIsProtected else { return }
         let limit = Int64(settings.quotaSize) * 1024 * 1024
 
-        var files = downloaded().reversed().map { url -> (URL, Int64) in
+        var files = ownedDownloads().reversed().map { url -> (URL, Int64) in
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             return (url, Int64(size))
         }
@@ -240,22 +287,29 @@ final class ImageLibrary {
 
         while total > limit, !files.isEmpty {
             let (url, size) = files.removeFirst()
-            try? fm.removeItem(at: url)
-            try? fm.removeItem(at: url.deletingPathExtension().appendingPathExtension("json"))
+            try? fm.trashItem(at: url, resultingItemURL: nil)
+            try? fm.trashItem(at: url.deletingPathExtension().appendingPathExtension("json"),
+                              resultingItemURL: nil)
             total -= size
         }
     }
 
     // MARK: - Bulk removal
 
-    /// How many downloaded images came from each source, for the UI.
-    /// Keyed by the source prefix embedded in the filename.
+    /// How many downloaded images came from each source row, for the UI.
+    ///
+    /// Keyed by `originSourceID` — the row of the Images table, e.g.
+    /// `unsplash|black and white` — because that is what the rotation filters
+    /// on. Keying on the filename prefix instead named only the *service*, so
+    /// two Unsplash searches collapsed into one bucket and removing either one
+    /// removed both.
+    ///
+    /// Images predating provenance have no row to attribute them to and are
+    /// grouped under `legacyBucket`, which is also what the rotation excludes.
     func downloadCountsBySource() -> [(source: String, count: Int, bytes: Int64)] {
         var tally: [String: (count: Int, bytes: Int64)] = [:]
-        for file in downloaded() {
-            let name = file.lastPathComponent
-            // Filenames are "<sourceid>-<rest>", from RemoteImage.id.
-            let source = name.split(separator: "-").first.map(String.init) ?? "other"
+        for file in ownedDownloads() {
+            let source = metadata(for: file)?.originSourceID ?? Self.legacyBucket
             let size = Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
             let existing = tally[source] ?? (0, 0)
             tally[source] = (existing.count + 1, existing.bytes + size)
@@ -264,6 +318,11 @@ final class ImageLibrary {
             .map { (source: $0.key, count: $0.value.count, bytes: $0.value.bytes) }
             .sorted { $0.count > $1.count }
     }
+
+    /// Bucket for downloads with no recorded source row. These are excluded
+    /// from rotation, so the Library tab needs to be able to name and clear
+    /// them — otherwise they are invisible disk usage.
+    static let legacyBucket = "(unknown source)"
 
     /// Removes downloaded images, optionally only those from one source.
     ///
@@ -276,11 +335,15 @@ final class ImageLibrary {
     ///   back.
     @discardableResult
     func clearDownloads(source: String? = nil, banish: Bool = true) -> Int {
+        guard !downloadFolderIsProtected else { return 0 }
+
         var removed = 0
-        for file in downloaded() {
+        for file in ownedDownloads() {
             if let source {
-                let prefix = file.lastPathComponent.split(separator: "-").first.map(String.init)
-                guard prefix == source else { continue }
+                // Matched on the source row, the same key the Library tab
+                // tallies by, so "Remove" clears exactly the bucket shown.
+                let origin = metadata(for: file)?.originSourceID ?? Self.legacyBucket
+                guard origin == source else { continue }
             }
 
             if banish, let meta = metadata(for: file) {
