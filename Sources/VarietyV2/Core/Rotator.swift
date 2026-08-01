@@ -441,14 +441,21 @@ final class Rotator {
                 try ImagePipeline.render(request, to: destination)
             }.value
 
-            // The overlay animates the transition and sets the real wallpaper
-            // underneath while it covers the screen. Awaited: the cover has to
-            // finish blending in before the wallpaper may be touched.
-            try await fadeOverlay.crossfade(from: lastShownGeneration,
-                                            to: destination,
-                                            duration: settings.wallpaperFade.duration) {
-                try WallpaperSetter.apply(url: destination)
-            }
+            // The overlay animates the desktop while the real wallpaper is
+            // walked through blended intermediates underneath — which is what
+            // keeps the menu bar tint, derived from the real wallpaper and
+            // uncoverable, moving with the fade. Set errors are logged rather
+            // than thrown: sets continue mid-transition, after this call has
+            // returned.
+            await fadeOverlay.crossfade(
+                from: lastShownGeneration,
+                to: destination,
+                duration: settings.wallpaperFade.duration,
+                stepFile: { [generations] in generations.nextURL(ext: "jpg") },
+                applyFile: { url in
+                    do { try WallpaperSetter.apply(url: url) }
+                    catch { NSLog("VarietyV2: could not set wallpaper: \(error)") }
+                })
             lastShownGeneration = destination
 
             current = file

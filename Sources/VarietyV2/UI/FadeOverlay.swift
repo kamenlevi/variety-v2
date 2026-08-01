@@ -75,32 +75,36 @@ final class FadeOverlay {
     /// transitions on its normal schedule, during the fade instead of after it.
     private static let coverAlpha: CGFloat = 0.985
 
-    /// How long the agent is given to pick the new wallpaper up before the
-    /// desktop dissolve begins. The menu bar pane covers its lagging backdrop
-    /// directly, but this stays as the fallback for anything else the agent
-    /// redraws on its own schedule.
-    private static let agentCatchUp: TimeInterval = 0.25
+    /// How far ahead of its visible moment a wallpaper set is issued, to absorb
+    /// the agent's processing latency (measured ~0.25 s).
+    private static let agentLead: TimeInterval = 0.25
 
     /// Runs the transition, leaving `next` set as the real wallpaper.
     ///
-    /// - Parameter apply: sets the wallpaper for real. Called while the overlay
-    ///   covers the screen, so the switch underneath is invisible.
+    /// - Parameters:
+    ///   - stepFile: hands back a fresh never-used path for an intermediate
+    ///     blended wallpaper (paths are cached by the agent, so reuse is a
+    ///     silent no-op).
+    ///   - applyFile: sets a file as the real wallpaper, logging rather than
+    ///     throwing — sets also happen mid-transition, long after the caller
+    ///     has moved on.
     func crossfade(from previous: URL?,
                    to next: URL,
                    duration: TimeInterval,
-                   apply: () throws -> Void) async rethrows {
+                   stepFile: @escaping () -> URL,
+                   applyFile: @escaping (URL) -> Void) async {
         guard duration > 0,
               let previous,
               let fromImage = Self.decode(previous),
               let toImage = Self.decode(next)
         else {
-            try apply()
+            applyFile(next)
             return
         }
 
         rebuildOverlaysIfScreensChanged()
         guard !overlays.isEmpty else {
-            try apply()
+            applyFile(next)
             return
         }
 
@@ -151,16 +155,6 @@ final class FadeOverlay {
             }, completionHandler: { done.resume() })
         }
 
-        do {
-            try apply()
-        } catch {
-            hide(ifToken: thisToken)
-            throw error
-        }
-
-        // Let the agent pick the file up while everything is covered.
-        try? await Task.sleep(for: .seconds(Self.agentCatchUp))
-
         for pane in allPanes {
             // Actions disabled around the opacity change: assigning `opacity`
             // outside a transaction adds CoreAnimation's own implicit 0.25 s
@@ -183,11 +177,104 @@ final class FadeOverlay {
             CATransaction.commit()
         }
 
-        // The cover comes off only once the wallpaper underneath has actually
-        // changed — never on a timer. See `hideWhenWallpaperLands`.
-        hideWhenWallpaperLands(expected: next,
-                               token: thisToken,
-                               fadeEndsAt: Date().addingTimeInterval(duration))
+        // Walk the *real* wallpaper through the same dissolve the layers are
+        // showing.
+        //
+        // The overlay can only animate the desktop; the menu bar's background
+        // is a derivation of the real wallpaper that the window server draws
+        // above anything coverable, and it updates in one step per wallpaper
+        // set. Setting the final image once therefore made the menu bar snap —
+        // at the end of the transition while the cover occluded the desktop,
+        // at the start once it no longer did. Either way it moved apart from
+        // the fade, because the two surfaces were being fed differently.
+        //
+        // Feeding the agent blended intermediates re-unifies them: the menu
+        // bar tint steps through the same old→new blend the overlay is
+        // dissolving through, at the same pace. The intermediates themselves
+        // are invisible — the cover hides the desktop — only their menu bar
+        // derivation shows. Each set is issued `agentLead` early so it lands
+        // on screen at its intended moment.
+        let fadeEndsAt = Date().addingTimeInterval(duration)
+        let schedule = Self.stepSchedule(duration: duration)
+
+        Task { @MainActor [weak self] in
+            let started = Date()
+            for step in schedule {
+                let wait = step.time - Date().timeIntervalSince(started)
+                if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+
+                // Superseded: the newer transition owns the wallpaper now, and
+                // a stale blend set after its final image would corrupt it.
+                guard let self, self.token == thisToken else { return }
+
+                if step.fraction >= 1 {
+                    applyFile(next)
+                } else {
+                    let url = stepFile()
+                    let fraction = step.fraction
+                    let written = await Task.detached(priority: .userInitiated) {
+                        Self.writeBlend(from: fromImage, to: toImage,
+                                        fraction: fraction, to: url)
+                    }.value
+                    if written { applyFile(url) }
+                }
+            }
+
+            guard let self, self.token == thisToken else { return }
+            // The cover comes off only once the wallpaper underneath has
+            // actually changed — never on a timer. See `hideWhenWallpaperLands`.
+            self.hideWhenWallpaperLands(expected: next,
+                                        token: thisToken,
+                                        fadeEndsAt: fadeEndsAt)
+        }
+    }
+
+    // MARK: - Wallpaper steps
+
+    /// When to set which blend, relative to the start of the dissolve.
+    ///
+    /// One set per ~0.4 s of fade, capped at four — the agent needs ~0.3 s per
+    /// set, and the tint derivation is coarse enough that four blends read as
+    /// continuous. The last entry is always fraction 1, the real image.
+    nonisolated static func stepSchedule(duration: TimeInterval)
+        -> [(time: TimeInterval, fraction: Double)] {
+        let count = max(1, min(4, Int((duration / 0.4).rounded())))
+        return (1...count).map { i in
+            (time: max(0, duration * Double(i) / Double(count) - agentLead),
+             fraction: Double(i) / Double(count))
+        }
+    }
+
+    /// Blends `to` over `from` at `fraction` and writes a JPEG.
+    ///
+    /// Deliberately cheap: these frames are 98.5 % hidden behind the cover and
+    /// exist only so the menu bar tint — a heavy blur of the top strip — has
+    /// something intermediate to derive from. Fidelity is wasted on them.
+    nonisolated private static func writeBlend(from: CGImage, to: CGImage,
+                                               fraction: Double, to url: URL) -> Bool {
+        let width = to.width, height = to.height
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue)
+        else { return false }
+
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        context.interpolationQuality = .medium
+        context.draw(from, in: rect)
+        context.setAlpha(CGFloat(fraction))
+        context.draw(to, in: rect)
+
+        guard let blended = context.makeImage(),
+              let destination = CGImageDestinationCreateWithURL(
+                  url as CFURL, "public.jpeg" as CFString, 1, nil)
+        else { return false }
+
+        CGImageDestinationAddImage(destination, blended, [
+            kCGImageDestinationLossyCompressionQuality: 0.7,
+        ] as CFDictionary)
+        return CGImageDestinationFinalize(destination)
     }
 
     // MARK: - Teardown

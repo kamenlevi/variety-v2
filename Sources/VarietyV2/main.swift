@@ -173,6 +173,11 @@ case "--cycle":
         } else {
             print("no image was set")
         }
+        // The transition sets the real wallpaper *during* the fade, after
+        // next() has returned; exiting immediately would kill those sets
+        // mid-flight and leave the previous wallpaper on screen.
+        try? await Task.sleep(for: .seconds(4))
+        print("settled on: \(WallpaperStore.currentImageURL()?.lastPathComponent ?? "unknown")")
     }
 
 case "--render":

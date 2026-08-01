@@ -32,6 +32,7 @@ enum SelfTest {
         preparedBufferCoversEverythingBeforeRepeating()
         donationDetailsAreUpstream()
         fadeFramesAreBounded()
+        wallpaperStepScheduleIsSane()
         sweepsSpareFilesTheAppDidNotCreate()
         sweepsRefuseProtectedFolders()
         sourceBucketsMatchTheRotationFilter()
@@ -335,7 +336,25 @@ enum SelfTest {
               FadeSpeed.allCases.allSatisfy { $0.duration <= 3 })
     }
 
-    // MARK: -
+    /// The stepped-wallpaper schedule that keeps the menu bar tint moving with
+    /// the fade. The invariant that must never break: the final entry is the
+    /// real image (fraction 1) — if a blend were ever the last thing set, the
+    /// desktop would be left showing a temporary file as its actual wallpaper.
+    private static func wallpaperStepScheduleIsSane() {
+        for speed in FadeSpeed.allCases where speed.duration > 0 {
+            let schedule = FadeOverlay.stepSchedule(duration: speed.duration)
+
+            check("\(speed.rawValue): schedule ends on the real image",
+                  schedule.last?.fraction == 1)
+            check("\(speed.rawValue): fractions climb monotonically",
+                  zip(schedule, schedule.dropFirst()).allSatisfy { $0.fraction < $1.fraction })
+            check("\(speed.rawValue): set times are ordered and within the fade",
+                  zip(schedule, schedule.dropFirst()).allSatisfy { $0.time <= $1.time }
+                      && schedule.allSatisfy { $0.time >= 0 && $0.time <= speed.duration })
+            check("\(speed.rawValue): at most four sets (agent needs ~0.3 s each)",
+                  schedule.count >= 1 && schedule.count <= 4)
+        }
+    }
 
     // MARK: - Deletion safety
 
