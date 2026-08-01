@@ -155,57 +155,48 @@ final class FadeOverlay {
             }, completionHandler: { done.resume() })
         }
 
-        for pane in allPanes {
-            // Actions disabled around the opacity change: assigning `opacity`
-            // outside a transaction adds CoreAnimation's own implicit 0.25 s
-            // animation on the same key path, which then runs *alongside* the
-            // explicit fade below. Two competing animations on one property
-            // make the dissolve jump rather than glide.
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 0
-            fade.toValue = 1
-            fade.duration = duration
-            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            fade.fillMode = .forwards
-            fade.isRemovedOnCompletion = false
-            pane.incoming.add(fade, forKey: "crossfade")
-            pane.incoming.opacity = 1
-
-            CATransaction.commit()
-        }
-
-        // Walk the *real* wallpaper through the same dissolve the layers are
-        // showing.
+        // Run the desktop and the real wallpaper through the SAME transition,
+        // on the SAME clock.
         //
         // The overlay can only animate the desktop; the menu bar's background
         // is a derivation of the real wallpaper that the window server draws
-        // above anything coverable, and it updates in one step per wallpaper
-        // set. Setting the final image once therefore made the menu bar snap —
-        // at the end of the transition while the cover occluded the desktop,
-        // at the start once it no longer did. Either way it moved apart from
-        // the fade, because the two surfaces were being fed differently.
+        // above anything coverable, and it updates once per wallpaper set. The
+        // two therefore cannot be made one surface — but they can be made to
+        // perform identical moves at identical moments, which reads as one.
         //
-        // Feeding the agent blended intermediates re-unifies them: the menu
-        // bar tint steps through the same old→new blend the overlay is
-        // dissolving through, at the same pace. The intermediates themselves
-        // are invisible — the cover hides the desktop — only their menu bar
-        // derivation shows. Each set is issued `agentLead` early so it lands
-        // on screen at its intended moment.
-        let fadeEndsAt = Date().addingTimeInterval(duration)
+        // Each step: a blend of old→new is set as the real wallpaper, issued
+        // `agentLead` early so it lands on screen at its scheduled moment; at
+        // that same moment the overlay blends its own layers to the same
+        // fraction. The menu bar tint (fed by the real wallpaper) and the
+        // desktop (fed by the overlay) then hold together, move together, and
+        // arrive together. An earlier version let the overlay glide smoothly
+        // through its own continuous dissolve instead — same endpoints, but
+        // between steps the two surfaces visibly drifted apart, which is
+        // exactly what it looked like: the menu bar doing something different
+        // from the desktop.
+        //
+        // The blends themselves are invisible (the cover hides the desktop);
+        // only their menu bar derivation shows.
         let schedule = Self.stepSchedule(duration: duration)
+        let spacing = duration / Double(schedule.count)
+        // Each overlay step blends rather than snaps, sized to the gap between
+        // steps — long enough to feel like movement, short enough to be done
+        // before the next step lands.
+        let stepBlend = min(0.35, spacing * 0.8)
+        let fadeEndsAt = Date().addingTimeInterval(duration + stepBlend)
 
-        Task { @MainActor [weak self] in
+        Task { @MainActor in
             let started = Date()
+            var shownFraction: Double = 0
+
             for step in schedule {
-                let wait = step.time - Date().timeIntervalSince(started)
-                if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+                // Issue the wallpaper set early so it lands on schedule.
+                let untilIssue = step.issue - Date().timeIntervalSince(started)
+                if untilIssue > 0 { try? await Task.sleep(for: .seconds(untilIssue)) }
 
                 // Superseded: the newer transition owns the wallpaper now, and
                 // a stale blend set after its final image would corrupt it.
-                guard let self, self.token == thisToken else { return }
+                guard self.token == thisToken else { return }
 
                 if step.fraction >= 1 {
                     applyFile(next)
@@ -218,9 +209,32 @@ final class FadeOverlay {
                     }.value
                     if written { applyFile(url) }
                 }
+
+                // When it lands, move the overlay with it.
+                let untilLand = step.land - Date().timeIntervalSince(started)
+                if untilLand > 0 { try? await Task.sleep(for: .seconds(untilLand)) }
+                guard self.token == thisToken else { return }
+
+                for pane in self.allPanes {
+                    // Actions disabled: an implicit 0.25 s animation on the
+                    // same key path would fight the explicit one.
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+
+                    let blend = CABasicAnimation(keyPath: "opacity")
+                    blend.fromValue = shownFraction
+                    blend.toValue = step.fraction
+                    blend.duration = stepBlend
+                    blend.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    pane.incoming.add(blend, forKey: "crossfade-\(step.fraction)")
+                    pane.incoming.opacity = Float(step.fraction)
+
+                    CATransaction.commit()
+                }
+                shownFraction = step.fraction
             }
 
-            guard let self, self.token == thisToken else { return }
+            guard self.token == thisToken else { return }
             // The cover comes off only once the wallpaper underneath has
             // actually changed — never on a timer. See `hideWhenWallpaperLands`.
             self.hideWhenWallpaperLands(expected: next,
@@ -231,17 +245,20 @@ final class FadeOverlay {
 
     // MARK: - Wallpaper steps
 
-    /// When to set which blend, relative to the start of the dissolve.
+    /// The transition's shared clock: when each blend is issued to the agent,
+    /// when it lands on screen (and the overlay moves with it), and how far
+    /// through the dissolve it is.
     ///
-    /// One set per ~0.4 s of fade, capped at four — the agent needs ~0.3 s per
-    /// set, and the tint derivation is coarse enough that four blends read as
-    /// continuous. The last entry is always fraction 1, the real image.
+    /// One step per ~0.4 s of fade, capped at four — the agent needs ~0.3 s per
+    /// set. The last entry is always fraction 1, the real image.
     nonisolated static func stepSchedule(duration: TimeInterval)
-        -> [(time: TimeInterval, fraction: Double)] {
+        -> [(issue: TimeInterval, land: TimeInterval, fraction: Double)] {
         let count = max(1, min(4, Int((duration / 0.4).rounded())))
         return (1...count).map { i in
-            (time: max(0, duration * Double(i) / Double(count) - agentLead),
-             fraction: Double(i) / Double(count))
+            let land = duration * Double(i) / Double(count)
+            return (issue: max(0, land - agentLead),
+                    land: land,
+                    fraction: Double(i) / Double(count))
         }
     }
 

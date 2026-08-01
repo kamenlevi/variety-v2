@@ -348,9 +348,11 @@ enum SelfTest {
                   schedule.last?.fraction == 1)
             check("\(speed.rawValue): fractions climb monotonically",
                   zip(schedule, schedule.dropFirst()).allSatisfy { $0.fraction < $1.fraction })
-            check("\(speed.rawValue): set times are ordered and within the fade",
-                  zip(schedule, schedule.dropFirst()).allSatisfy { $0.time <= $1.time }
-                      && schedule.allSatisfy { $0.time >= 0 && $0.time <= speed.duration })
+            check("\(speed.rawValue): steps are ordered, issued before they land, within the fade",
+                  zip(schedule, schedule.dropFirst()).allSatisfy { $0.land <= $1.land }
+                      && schedule.allSatisfy {
+                          $0.issue >= 0 && $0.issue <= $0.land && $0.land <= speed.duration
+                      })
             check("\(speed.rawValue): at most four sets (agent needs ~0.3 s each)",
                   schedule.count >= 1 && schedule.count <= 4)
         }
