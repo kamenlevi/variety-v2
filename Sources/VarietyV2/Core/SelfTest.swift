@@ -355,6 +355,18 @@ enum SelfTest {
                       })
             check("\(speed.rawValue): at most four sets (agent needs ~0.3 s each)",
                   schedule.count >= 1 && schedule.count <= 4)
+
+            // Movement must begin almost immediately — an even division held
+            // the outgoing wallpaper frozen for the first 0.4 s, which read as
+            // the old image sitting there too long.
+            check("\(speed.rawValue): the first step lands promptly",
+                  (schedule.first?.land ?? 99) <= 0.3)
+
+            // And the sets must stay far enough apart for the agent to render
+            // each one (~0.3 s), or intermediate blends get coalesced away.
+            let gaps = zip(schedule.dropFirst(), schedule).map { $0.land - $1.land }
+            check("\(speed.rawValue): sets are spaced for the agent to keep up",
+                  gaps.allSatisfy { $0 >= 0.3 })
         }
     }
 

@@ -120,7 +120,14 @@ final class FadeOverlay {
             pane.base.contents = fromImage
             pane.incoming.contents = toImage
             pane.incoming.opacity = 0
-            pane.incoming.removeAnimation(forKey: "crossfade")
+            // Remove ALL animations, not a named one: the step blends carry
+            // per-fraction keys, and one is still in flight whenever a change
+            // supersedes the previous transition's tail. Left attached, it
+            // keeps driving the freshly-swapped layers with the *previous*
+            // wallpaper's fractions — the old image ghosting into the new
+            // fade, then snapping when the stale animation expires.
+            pane.incoming.removeAllAnimations()
+            pane.base.removeAllAnimations()
             CATransaction.commit()
 
             if !pane.window.isVisible {
@@ -178,11 +185,14 @@ final class FadeOverlay {
         // The blends themselves are invisible (the cover hides the desktop);
         // only their menu bar derivation shows.
         let schedule = Self.stepSchedule(duration: duration)
-        let spacing = duration / Double(schedule.count)
-        // Each overlay step blends rather than snaps, sized to the gap between
-        // steps — long enough to feel like movement, short enough to be done
-        // before the next step lands.
-        let stepBlend = min(0.35, spacing * 0.8)
+        // Each overlay step blends rather than snaps, stretched to nearly fill
+        // the gap to the next step — back-to-back eased blends read as one
+        // continuous motion rather than pulses, which is as smooth as a
+        // transition quantised by the agent's set rate can be. Capped at 0.5 s,
+        // roughly the agent's own per-set transition, so the overlay and the
+        // menu bar tint move over the same span as well as at the same moment.
+        let gaps = zip(schedule.dropFirst(), schedule).map { $0.land - $1.land }
+        let stepBlend = min(0.5, (gaps.min() ?? duration) * 0.85)
         let fadeEndsAt = Date().addingTimeInterval(duration + stepBlend)
 
         Task { @MainActor in
@@ -251,11 +261,21 @@ final class FadeOverlay {
     ///
     /// One step per ~0.4 s of fade, capped at four — the agent needs ~0.3 s per
     /// set. The last entry is always fraction 1, the real image.
+    ///
+    /// The first step lands at ~0.2 s rather than an even `duration / count`
+    /// division: with even division a medium fade held the outgoing wallpaper
+    /// frozen for 0.4 s before anything moved, which read as the old image
+    /// sitting there too long. Movement should begin as soon as the cover is
+    /// up; the remaining steps spread evenly to finish exactly at `duration`.
     nonisolated static func stepSchedule(duration: TimeInterval)
         -> [(issue: TimeInterval, land: TimeInterval, fraction: Double)] {
         let count = max(1, min(4, Int((duration / 0.4).rounded())))
+        let firstLand = min(0.2, duration / 2)
+
         return (1...count).map { i in
-            let land = duration * Double(i) / Double(count)
+            let land = count == 1
+                ? min(0.3, duration)
+                : firstLand + (duration - firstLand) * Double(i - 1) / Double(count - 1)
             return (issue: max(0, land - agentLead),
                     land: land,
                     fraction: Double(i) / Double(count))
