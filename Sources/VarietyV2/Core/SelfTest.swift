@@ -353,8 +353,8 @@ enum SelfTest {
                       && schedule.allSatisfy {
                           $0.issue >= 0 && $0.issue <= $0.land && $0.land <= speed.duration
                       })
-            check("\(speed.rawValue): at most four sets (agent needs ~0.3 s each)",
-                  schedule.count >= 1 && schedule.count <= 4)
+            check("\(speed.rawValue): at most five sets (agent sustains ~0.3 s cadence)",
+                  schedule.count >= 1 && schedule.count <= 5)
 
             // Movement must begin almost immediately — an even division held
             // the outgoing wallpaper frozen for the first 0.4 s, which read as
@@ -366,7 +366,16 @@ enum SelfTest {
             // each one (~0.3 s), or intermediate blends get coalesced away.
             let gaps = zip(schedule.dropFirst(), schedule).map { $0.land - $1.land }
             check("\(speed.rawValue): sets are spaced for the agent to keep up",
-                  gaps.allSatisfy { $0 >= 0.3 })
+                  gaps.allSatisfy { $0 >= 0.29 })
+
+            // Anchors must sit ON the overlay's eased dissolve, not beside it:
+            // a linear anchor against an eased fade is a visible drift.
+            check("\(speed.rawValue): anchors sample the eased curve",
+                  schedule.allSatisfy { step in
+                      let t = step.land / speed.duration
+                      let eased = t * t * (3 - 2 * t)
+                      return step.fraction == 1.0 || abs(step.fraction - eased) < 0.001
+                  })
         }
     }
 

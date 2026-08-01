@@ -162,45 +162,48 @@ final class FadeOverlay {
             }, completionHandler: { done.resume() })
         }
 
-        // Run the desktop and the real wallpaper through the SAME transition,
-        // on the SAME clock.
+        // One dissolve, two interpolation rates.
         //
-        // The overlay can only animate the desktop; the menu bar's background
-        // is a derivation of the real wallpaper that the window server draws
-        // above anything coverable, and it updates once per wallpaper set. The
-        // two therefore cannot be made one surface — but they can be made to
-        // perform identical moves at identical moments, which reads as one.
-        //
-        // Each step: a blend of old→new is set as the real wallpaper, issued
-        // `agentLead` early so it lands on screen at its scheduled moment; at
-        // that same moment the overlay blends its own layers to the same
-        // fraction. The menu bar tint (fed by the real wallpaper) and the
-        // desktop (fed by the overlay) then hold together, move together, and
-        // arrive together. An earlier version let the overlay glide smoothly
-        // through its own continuous dissolve instead — same endpoints, but
-        // between steps the two surfaces visibly drifted apart, which is
-        // exactly what it looked like: the menu bar doing something different
-        // from the desktop.
+        // The overlay's fade is a single Core Animation dissolve, driven by the
+        // render server at the display's refresh rate — this is the smooth
+        // part, and nothing about it is quantised. The real wallpaper cannot
+        // move like that: the agent manages ~3 sets a second. So it is fed
+        // blends sampled from the SAME eased curve the overlay is animating,
+        // as densely as it can take them, each landing exactly on the value
+        // the overlay is passing through at that moment. Between anchors the
+        // agent's own per-set crossfade keeps the menu bar tint moving, so
+        // both surfaces trace one trajectory — the desktop continuously, the
+        // tint through close anchors — instead of one gliding past the other
+        // (the earlier drift) or both pulsing in lockstep (the earlier
+        // chunkiness).
         //
         // The blends themselves are invisible (the cover hides the desktop);
-        // only their menu bar derivation shows.
+        // only their menu bar derivation shows. Each is issued `agentLead`
+        // early so it lands at its scheduled moment.
         let schedule = Self.stepSchedule(duration: duration)
-        // Each overlay step blends rather than snaps, stretched to nearly fill
-        // the gap to the next step — back-to-back eased blends read as one
-        // continuous motion rather than pulses, which is as smooth as a
-        // transition quantised by the agent's set rate can be. Capped at 0.5 s,
-        // roughly the agent's own per-set transition, so the overlay and the
-        // menu bar tint move over the same span as well as at the same moment.
-        let gaps = zip(schedule.dropFirst(), schedule).map { $0.land - $1.land }
-        let stepBlend = min(0.5, (gaps.min() ?? duration) * 0.85)
-        let fadeEndsAt = Date().addingTimeInterval(duration + stepBlend)
+        let fadeEndsAt = Date().addingTimeInterval(duration)
+
+        for pane in allPanes {
+            // Actions disabled: an implicit 0.25 s animation on the same key
+            // path would fight the explicit one.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0
+            fade.toValue = 1
+            fade.duration = duration
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            pane.incoming.add(fade, forKey: "crossfade")
+            pane.incoming.opacity = 1
+
+            CATransaction.commit()
+        }
 
         Task { @MainActor in
             let started = Date()
-            var shownFraction: Double = 0
 
             for step in schedule {
-                // Issue the wallpaper set early so it lands on schedule.
                 let untilIssue = step.issue - Date().timeIntervalSince(started)
                 if untilIssue > 0 { try? await Task.sleep(for: .seconds(untilIssue)) }
 
@@ -219,29 +222,6 @@ final class FadeOverlay {
                     }.value
                     if written { applyFile(url) }
                 }
-
-                // When it lands, move the overlay with it.
-                let untilLand = step.land - Date().timeIntervalSince(started)
-                if untilLand > 0 { try? await Task.sleep(for: .seconds(untilLand)) }
-                guard self.token == thisToken else { return }
-
-                for pane in self.allPanes {
-                    // Actions disabled: an implicit 0.25 s animation on the
-                    // same key path would fight the explicit one.
-                    CATransaction.begin()
-                    CATransaction.setDisableActions(true)
-
-                    let blend = CABasicAnimation(keyPath: "opacity")
-                    blend.fromValue = shownFraction
-                    blend.toValue = step.fraction
-                    blend.duration = stepBlend
-                    blend.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                    pane.incoming.add(blend, forKey: "crossfade-\(step.fraction)")
-                    pane.incoming.opacity = Float(step.fraction)
-
-                    CATransaction.commit()
-                }
-                shownFraction = step.fraction
             }
 
             guard self.token == thisToken else { return }
@@ -255,30 +235,31 @@ final class FadeOverlay {
 
     // MARK: - Wallpaper steps
 
-    /// The transition's shared clock: when each blend is issued to the agent,
-    /// when it lands on screen (and the overlay moves with it), and how far
-    /// through the dissolve it is.
+    /// The wallpaper sets that anchor the real desktop (and so the menu bar
+    /// tint) to the overlay's dissolve: when each blend is issued, when it
+    /// lands, and the dissolve's value at that moment.
     ///
-    /// One step per ~0.4 s of fade, capped at four — the agent needs ~0.3 s per
-    /// set. The last entry is always fraction 1, the real image.
-    ///
-    /// The first step lands at ~0.2 s rather than an even `duration / count`
-    /// division: with even division a medium fade held the outgoing wallpaper
-    /// frozen for 0.4 s before anything moved, which read as the old image
-    /// sitting there too long. Movement should begin as soon as the cover is
-    /// up; the remaining steps spread evenly to finish exactly at `duration`.
+    /// One anchor per ~0.3 s — burst-probed as a cadence the agent sustains
+    /// without coalescing — capped at five. Fractions are sampled from the
+    /// same eased curve the overlay animates (smoothstep ≈ ease-in-ease-out),
+    /// so every anchor sits ON the dissolve rather than on a straight line
+    /// beside it. The first lands promptly — the outgoing wallpaper must not
+    /// sit frozen — and the last is always fraction 1, the real image.
     nonisolated static func stepSchedule(duration: TimeInterval)
         -> [(issue: TimeInterval, land: TimeInterval, fraction: Double)] {
-        let count = max(1, min(4, Int((duration / 0.4).rounded())))
+        let count = max(1, min(5, Int((duration / 0.3).rounded())))
         let firstLand = min(0.2, duration / 2)
 
         return (1...count).map { i in
             let land = count == 1
                 ? min(0.3, duration)
                 : firstLand + (duration - firstLand) * Double(i - 1) / Double(count - 1)
+            // The dissolve's eased value at this anchor's moment.
+            let progress = count == 1 ? 1.0 : land / duration
+            let eased = progress * progress * (3 - 2 * progress)
             return (issue: max(0, land - agentLead),
                     land: land,
-                    fraction: Double(i) / Double(count))
+                    fraction: i == count ? 1.0 : eased)
         }
     }
 
