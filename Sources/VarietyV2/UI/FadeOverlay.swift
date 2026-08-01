@@ -62,6 +62,19 @@ final class FadeOverlay {
     /// How long the cover takes to blend in before anything changes beneath it.
     private static let coverInDuration: TimeInterval = 0.15
 
+    /// The cover's maximum opacity — deliberately just short of 1.
+    ///
+    /// A fully opaque cover lets the window server mark the wallpaper beneath
+    /// as occluded, and it then *defers everything derived from the wallpaper*
+    /// until the cover lifts: the agent's own crossfade, and — the visible
+    /// symptom — the menu bar tint, which snapped to the new wallpaper only
+    /// after the fade had completely finished. `isOpaque = false` on the
+    /// window was not enough; occlusion is judged from the composited pixels,
+    /// and ours covered everything at alpha 1. At 98.5% the leak-through is
+    /// imperceptible, but the wallpaper stays live underneath, so the menu bar
+    /// transitions on its normal schedule, during the fade instead of after it.
+    private static let coverAlpha: CGFloat = 0.985
+
     /// How long the agent is given to pick the new wallpaper up before the
     /// desktop dissolve begins. The menu bar pane covers its lagging backdrop
     /// directly, but this stays as the fallback for anything else the agent
@@ -134,7 +147,7 @@ final class FadeOverlay {
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = Self.coverInDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                self.allPanes.forEach { $0.window.animator().alphaValue = 1 }
+                self.allPanes.forEach { $0.window.animator().alphaValue = Self.coverAlpha }
             }, completionHandler: { done.resume() })
         }
 
@@ -273,7 +286,7 @@ final class FadeOverlay {
                 guard let self, self.token == expected else { return }
                 for window in windows {
                     window.orderOut(nil)
-                    window.alphaValue = 1
+                    window.alphaValue = Self.coverAlpha
                 }
             }
         })
@@ -351,14 +364,12 @@ final class FadeOverlay {
         window.level = level
         window.collectionBehavior = behavior
         window.ignoresMouseEvents = true
-        // Deliberately *not* opaque, even though the content is.
-        //
-        // A full-screen opaque window lets the window server mark the desktop
-        // beneath it as occluded and skip repainting it — so WallpaperAgent's
-        // own crossfade to the new image would not actually run until the cover
-        // came off, surfacing as a twitch at the very end of the transition.
-        // Declaring the window non-opaque keeps the wallpaper live underneath,
-        // at negligible compositing cost for one static layer.
+        // Declared non-opaque, but note this flag alone did NOT stop the
+        // window server treating the desktop beneath as occluded — occlusion
+        // is judged from the composited pixels, and the cover's content is
+        // opaque wall to wall. The actual guarantee is `coverAlpha`: the
+        // window never quite reaches alpha 1, so the wallpaper (and the menu
+        // bar tint derived from it) stays live underneath.
         window.isOpaque = false
         window.hasShadow = false
         window.backgroundColor = .clear
