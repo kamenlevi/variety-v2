@@ -318,14 +318,21 @@ final class FadeOverlay {
 
     /// How often the agent's index is consulted while waiting.
     private static let pollInterval: TimeInterval = 0.1
-    /// Grace after the new wallpaper is confirmed, covering the system's own
-    /// crossfade, which starts when the agent picks the file up (measured at
-    /// ~0.3 s to land, ~0.5 s to fade, so it finishes alongside our own).
+    /// Grace after the agent's index confirms the final image, before the
+    /// cover starts to lift.
     ///
-    /// Kept short because the uncover is a dissolve rather than a cut: residual
-    /// timing error is now blended away instead of snapping, so there is no
-    /// reason to pad the wait and make every change feel sluggish.
-    private static let settleGrace: TimeInterval = 0.3
+    /// This must outlast the agent's own final crossfade, and the index gives
+    /// no signal for when that ends — measured, the index flips ~0.25 s after
+    /// each set (burst-probed at the fade schedule's own cadence, no
+    /// coalescing), which is when the agent *starts* its visual transition,
+    /// not when it finishes. At the previous 0.3 s the cover lifted while the
+    /// desktop underneath was still mid-blend — and since that blend starts
+    /// from the last intermediate (75 % new, 25 % old), the OLD wallpaper
+    /// faintly resurfaced at the end of every change and then dissolved again:
+    /// the ghost. A full second covers the agent's fade with margin, and the
+    /// extra wait is invisible — the cover is already showing the final image,
+    /// and the desktop underneath finishes identical to it.
+    private static let settleGrace: TimeInterval = 1.0
     /// Ceiling on the wait. Reached only if the set silently did nothing, in
     /// which case uncovering shows the truth rather than hiding it forever.
     private static let landingTimeout: TimeInterval = 6
@@ -381,7 +388,9 @@ final class FadeOverlay {
     }
 
     /// How long the cover takes to dissolve away at the end of a transition.
-    private static let uncoverDuration: TimeInterval = 0.35
+    /// Generous: the reveal is the last place any residual mismatch between
+    /// the cover and the real desktop can show, and a slower blend buries it.
+    private static let uncoverDuration: TimeInterval = 0.5
 
     /// Dissolves the cover away, rather than cutting to the real wallpaper.
     ///
