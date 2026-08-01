@@ -11,6 +11,10 @@ struct RotationState: Codable {
     var history: [String] = []
     var index: Int = -1
     var current: String?
+    /// The rendered generation file on screen — the "from" image of the next
+    /// crossfade. Without persisting it, the first change after a relaunch has
+    /// nothing to fade from and falls back to a hard cut.
+    var lastShown: String?
 
     /// Bounded: history is a browsing aid, not an archive, and an unbounded
     /// list would grow for the life of the install.
@@ -37,6 +41,9 @@ struct RotationState: Codable {
         }
         if let current = state.current, !fm.fileExists(atPath: current) {
             state.current = nil
+        }
+        if let shown = state.lastShown, !fm.fileExists(atPath: shown) {
+            state.lastShown = nil
         }
         return state
     }

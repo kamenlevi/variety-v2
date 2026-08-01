@@ -3,11 +3,23 @@ import QuartzCore
 
 /// A smooth crossfade between wallpapers.
 ///
-/// The transition happens in a window sitting at the desktop level: above the
-/// wallpaper, but *below* the desktop icon layer, so icons stay in front and it
-/// is indistinguishable from the wallpaper itself. Core Animation dissolves
-/// inside it at the display's refresh rate, and the real wallpaper is set
-/// underneath while it is covered.
+/// The transition happens in windows the compositor stacks with the desktop:
+/// above the wallpaper, below the things the user interacts with. Core
+/// Animation dissolves inside them at the display's refresh rate, and the real
+/// wallpaper is set underneath while it is covered.
+///
+/// Each overlay is two panes, because the desktop is drawn as two surfaces
+/// (probed via `CGWindowListCopyWindowInfo`, macOS 26.5):
+///
+///   - the wallpaper itself, at the bottom of the desktop stack — covered by
+///     the *desktop pane*, which sits just below the desktop icon layer
+///   - an 83 pt wallpaper-derived strip the window server draws across the top
+///     of the screen as the menu bar's backdrop, one level *above* the desktop
+///     icons — so a desktop-level fade can never reach it, and it repaints
+///     only when WallpaperAgent processes the new wallpaper, ~0.3 s late. The
+///     *menu bar pane* covers it from one level higher still, below the menu
+///     bar's own text and status items (levels 24/25), so the strip fades in
+///     lockstep with the desktop instead of trailing it.
 ///
 /// The overlay is a reconstruction of the wallpaper, and a reconstruction is
 /// never pixel-identical to the real thing — so *every* boundary where the
@@ -27,10 +39,17 @@ import QuartzCore
 @MainActor
 final class FadeOverlay {
 
-    private struct Overlay {
+    /// One window with an outgoing image and an incoming image layered inside.
+    private struct Pane {
         let window: NSWindow
         let base: CALayer
         let incoming: CALayer
+    }
+
+    /// The panes covering one screen: the desktop, and the menu bar strip when
+    /// the screen has one.
+    private struct Overlay {
+        let panes: [Pane]
     }
 
     private var overlays: [Overlay] = []
@@ -38,13 +57,15 @@ final class FadeOverlay {
     /// Incremented per transition; a cleanup runs only if it still matches.
     private var token = 0
 
+    private var allPanes: [Pane] { overlays.flatMap(\.panes) }
+
     /// How long the cover takes to blend in before anything changes beneath it.
     private static let coverInDuration: TimeInterval = 0.15
 
     /// How long the agent is given to pick the new wallpaper up before the
-    /// desktop dissolve begins — the midpoint of its measured 160-370 ms
-    /// latency. The menu bar backdrop follows the agent, not this overlay, so
-    /// this is what keeps the two visually in step.
+    /// desktop dissolve begins. The menu bar pane covers its lagging backdrop
+    /// directly, but this stays as the fallback for anything else the agent
+    /// redraws on its own schedule.
     private static let agentCatchUp: TimeInterval = 0.25
 
     /// Runs the transition, leaving `next` set as the real wallpaper.
@@ -73,24 +94,24 @@ final class FadeOverlay {
         token &+= 1
         let thisToken = token
 
-        for overlay in overlays {
+        for pane in allPanes {
             // No implicit animation on the content swap: the layers must be
             // showing the outgoing image *before* the window appears, or the
             // first frame is a cross-dissolve from whatever was there last.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            overlay.base.contents = fromImage
-            overlay.incoming.contents = toImage
-            overlay.incoming.opacity = 0
-            overlay.incoming.removeAnimation(forKey: "crossfade")
+            pane.base.contents = fromImage
+            pane.incoming.contents = toImage
+            pane.incoming.opacity = 0
+            pane.incoming.removeAnimation(forKey: "crossfade")
             CATransaction.commit()
 
-            if !overlay.window.isVisible {
+            if !pane.window.isVisible {
                 // Enter transparent: the window becomes visible before the
                 // render server has necessarily drawn its first frame, and at
                 // alpha 0 whatever that frame contains cannot flash.
-                overlay.window.alphaValue = 0
-                overlay.window.orderFront(nil)
+                pane.window.alphaValue = 0
+                pane.window.orderFront(nil)
             }
         }
 
@@ -104,21 +125,16 @@ final class FadeOverlay {
         // every change — the end was already blended, the beginning was not.
         //
         // Going through the animator also supersedes any uncover dissolve
-        // still in flight from the previous transition. The old code assigned
-        // `alphaValue = 1` directly, which does not cancel a running
-        // NSAnimationContext animation — the old animation kept driving the
-        // alpha back down, so the fresh cover faded away mid-transition and
-        // the wallpaper swap underneath happened in plain view.
+        // still in flight from the previous transition; a direct assignment
+        // would not, and the old animation would keep driving the alpha down.
         //
-        // Awaiting completion also replaces the old CATransaction.flush():
-        // once this animation has finished, the cover is by definition
-        // composited on screen, so the wallpaper swap below is guaranteed to
-        // happen under it rather than racing it.
+        // Awaiting completion guarantees the cover is composited on screen, so
+        // the wallpaper swap below happens under it rather than racing it.
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = Self.coverInDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                overlays.forEach { $0.window.animator().alphaValue = 1 }
+                self.allPanes.forEach { $0.window.animator().alphaValue = 1 }
             }, completionHandler: { done.resume() })
         }
 
@@ -129,20 +145,10 @@ final class FadeOverlay {
             throw error
         }
 
-        // Hold the cover until WallpaperAgent has caught up, so the menu bar
-        // and the desktop start changing together.
-        //
-        // The menu bar's tinted backdrop is not ours to animate: macOS derives
-        // it from the *real* wallpaper, so it ignores this overlay entirely and
-        // transitions on the agent's schedule — which begins only once the
-        // agent has read and rendered the new file, ~160-370 ms (measured)
-        // after the set call above. Starting the desktop dissolve immediately
-        // made the desktop lead and the menu bar trail by that much, which
-        // reads as the menu bar lagging half a second behind every change.
-        // Holding here lines the two transitions up instead.
+        // Let the agent pick the file up while everything is covered.
         try? await Task.sleep(for: .seconds(Self.agentCatchUp))
 
-        for overlay in overlays {
+        for pane in allPanes {
             // Actions disabled around the opacity change: assigning `opacity`
             // outside a transaction adds CoreAnimation's own implicit 0.25 s
             // animation on the same key path, which then runs *alongside* the
@@ -158,8 +164,8 @@ final class FadeOverlay {
             fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             fade.fillMode = .forwards
             fade.isRemovedOnCompletion = false
-            overlay.incoming.add(fade, forKey: "crossfade")
-            overlay.incoming.opacity = 1
+            pane.incoming.add(fade, forKey: "crossfade")
+            pane.incoming.opacity = 1
 
             CATransaction.commit()
         }
@@ -254,7 +260,7 @@ final class FadeOverlay {
     /// mismatch invisible, without needing to enumerate them.
     private func hide(ifToken expected: Int) {
         guard token == expected else { return }
-        let windows = overlays.map(\.window)
+        let windows = allPanes.map(\.window)
 
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.uncoverDuration
@@ -281,21 +287,69 @@ final class FadeOverlay {
             && zip(screens, overlayScreens).allSatisfy { $0.frame == $1.frame }
         guard !unchanged else { return }
 
-        overlays.forEach { $0.window.orderOut(nil) }
+        allPanes.forEach { $0.window.orderOut(nil) }
         overlays = screens.map(makeOverlay(on:))
         overlayScreens = screens
     }
 
     private func makeOverlay(on screen: NSScreen) -> Overlay {
-        let window = NSWindow(contentRect: screen.frame,
-                              styleMask: [.borderless],
-                              backing: .buffered, defer: false, screen: screen)
+        var panes: [Pane] = []
 
-        // Below the desktop icons, above the wallpaper. Anything higher would
-        // cover the user's icons for the length of the fade.
-        window.level = NSWindow.Level(
-            rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) - 1)
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        // The desktop: below the icon layer, so files on the desktop and
+        // widgets stay in front of the fade.
+        panes.append(makePane(
+            frame: screen.frame,
+            imageFrame: NSRect(origin: .zero, size: screen.frame.size),
+            level: NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) - 1),
+            // Present in every Space; the desktop exists in all of them.
+            behavior: [.canJoinAllSpaces, .stationary, .ignoresCycle],
+            scale: screen.backingScaleFactor))
+
+        // The menu bar strip. The window server's wallpaper-derived backdrop
+        // for the menu bar sits one level above the desktop icons (probed at
+        // desktopIcon+1), so it must be covered from higher still — while
+        // staying below the menu bar window itself (level 24), which owns the
+        // text, status items and vibrancy that must remain in front.
+        //
+        // Deliberately *not* .fullScreenAuxiliary: in a full-screen Space the
+        // app's content occupies this strip, and a transition there would draw
+        // a band of wallpaper over it.
+        let stripHeight = screen.frame.maxY - screen.visibleFrame.maxY
+        if stripHeight > 0 {
+            let strip = NSRect(x: screen.frame.minX,
+                               y: screen.frame.maxY - stripHeight,
+                               width: screen.frame.width,
+                               height: stripHeight)
+            // The image layer keeps the full screen's geometry, anchored so its
+            // top edge lines up with the strip's: the pane then shows exactly
+            // the top sliver of the same aspect-filled image as the desktop
+            // pane below it, and the two read as one surface.
+            let imageFrame = NSRect(x: 0,
+                                    y: stripHeight - screen.frame.height,
+                                    width: screen.frame.width,
+                                    height: screen.frame.height)
+            panes.append(makePane(
+                frame: strip,
+                imageFrame: imageFrame,
+                level: NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 2),
+                behavior: [.canJoinAllSpaces, .stationary, .ignoresCycle],
+                scale: screen.backingScaleFactor))
+        }
+
+        return Overlay(panes: panes)
+    }
+
+    private func makePane(frame: NSRect,
+                          imageFrame: NSRect,
+                          level: NSWindow.Level,
+                          behavior: NSWindow.CollectionBehavior,
+                          scale: CGFloat) -> Pane {
+        let window = NSWindow(contentRect: frame,
+                              styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.setFrame(frame, display: false)
+        window.level = level
+        window.collectionBehavior = behavior
         window.ignoresMouseEvents = true
         // Deliberately *not* opaque, even though the content is.
         //
@@ -310,18 +364,17 @@ final class FadeOverlay {
         window.backgroundColor = .clear
         window.isReleasedWhenClosed = false
 
-        let host = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        let host = NSView(frame: NSRect(origin: .zero, size: frame.size))
         host.wantsLayer = true
+        host.layer?.masksToBounds = true
 
         // Layers created by hand default to `contentsScale` 1, regardless of the
         // display. On Retina that resamples a full-resolution wallpaper down to
         // point size, so the cover renders visibly softer than the real
         // wallpaper — and uncovering snaps from soft to sharp, which reads as a
         // blink at the end of an otherwise clean fade.
-        let scale = screen.backingScaleFactor
-
         let base = CALayer()
-        base.frame = host.bounds
+        base.frame = imageFrame
         base.contentsScale = scale
         base.contentsGravity = .resizeAspectFill
         base.masksToBounds = true
@@ -329,21 +382,19 @@ final class FadeOverlay {
         // Aspect-fill leaves no gap for a correctly-sized wallpaper, but a
         // mismatched image would otherwise let the desktop show through.
         base.backgroundColor = CGColor(gray: 0, alpha: 1)
-        base.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
 
         let incoming = CALayer()
-        incoming.frame = host.bounds
+        incoming.frame = NSRect(origin: .zero, size: imageFrame.size)
         incoming.contentsScale = scale
         incoming.contentsGravity = .resizeAspectFill
         incoming.masksToBounds = true
         incoming.opacity = 0
-        incoming.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
 
         base.addSublayer(incoming)
         host.layer?.addSublayer(base)
         window.contentView = host
 
-        return Overlay(window: window, base: base, incoming: incoming)
+        return Pane(window: window, base: base, incoming: incoming)
     }
 
     /// Decoded once at screen size. Full-resolution wallpapers would stutter the

@@ -62,13 +62,15 @@ final class Rotator {
         historyIndex = history.count - 1
         current = state.current.map { URL(fileURLWithPath: $0) }
         currentOrigin = current.flatMap { library.metadata(for: $0) }
+        lastShownGeneration = state.lastShown.map { URL(fileURLWithPath: $0) }
     }
 
     private func persistState() {
         RotationState(
             history: history.suffix(RotationState.maxHistory).map(\.path),
             index: min(historyIndex, history.count - 1),
-            current: current?.path
+            current: current?.path,
+            lastShown: lastShownGeneration?.path
         ).save()
     }
 
