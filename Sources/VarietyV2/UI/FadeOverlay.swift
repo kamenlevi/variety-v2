@@ -41,6 +41,12 @@ final class FadeOverlay {
     /// How long the cover takes to blend in before anything changes beneath it.
     private static let coverInDuration: TimeInterval = 0.15
 
+    /// How long the agent is given to pick the new wallpaper up before the
+    /// desktop dissolve begins — the midpoint of its measured 160-370 ms
+    /// latency. The menu bar backdrop follows the agent, not this overlay, so
+    /// this is what keeps the two visually in step.
+    private static let agentCatchUp: TimeInterval = 0.25
+
     /// Runs the transition, leaving `next` set as the real wallpaper.
     ///
     /// - Parameter apply: sets the wallpaper for real. Called while the overlay
@@ -122,6 +128,19 @@ final class FadeOverlay {
             hide(ifToken: thisToken)
             throw error
         }
+
+        // Hold the cover until WallpaperAgent has caught up, so the menu bar
+        // and the desktop start changing together.
+        //
+        // The menu bar's tinted backdrop is not ours to animate: macOS derives
+        // it from the *real* wallpaper, so it ignores this overlay entirely and
+        // transitions on the agent's schedule — which begins only once the
+        // agent has read and rendered the new file, ~160-370 ms (measured)
+        // after the set call above. Starting the desktop dissolve immediately
+        // made the desktop lead and the menu bar trail by that much, which
+        // reads as the menu bar lagging half a second behind every change.
+        // Holding here lines the two transitions up instead.
+        try? await Task.sleep(for: .seconds(Self.agentCatchUp))
 
         for overlay in overlays {
             // Actions disabled around the opacity change: assigning `opacity`
